@@ -16,6 +16,7 @@ class Path:
     DAILY_CHART = "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
     SEARCH_STOCK_INFO = "/uapi/domestic-stock/v1/quotations/search-stock-info"
     INVESTOR_FLOW = "/uapi/domestic-stock/v1/quotations/inquire-investor"
+    INDEX_DAILY_CHART = "/uapi/domestic-stock/v1/quotations/inquire-daily-indexchartprice"
 
     # 계좌 (read-only)
     BALANCE = "/uapi/domestic-stock/v1/trading/inquire-balance"
@@ -27,10 +28,33 @@ class TrId:
     DAILY_CHART = "FHKST03010100"
     SEARCH_STOCK_INFO = "CTPF1604R"
     INVESTOR_FLOW = "FHKST01010900"
+    INDEX_DAILY_CHART = "FHKUP03500100"
     BALANCE = "TTTC8434R"
 
 
-# KIS 응답 컬럼 → 내부 스키마 매핑 (일봉)
+# KIS 지수 코드 (FID_INPUT_ISCD).
+# 시장 구분 코드(FID_COND_MRKT_DIV_CODE)는 'U' (업종지수).
+INDEX_CODES = {
+    "KOSPI": "0001",
+    "KOSDAQ": "1001",
+    "KOSPI200": "2001",
+    "KOSDAQ150": "2003",
+}
+
+
+# 지수 일봉 응답 컬럼 → 내부 스키마. 주식과 컬럼명 다름.
+INDEX_BAR_FIELDS = {
+    "stck_bsop_date": "date",
+    "bstp_nmix_oprc": "open",
+    "bstp_nmix_hgpr": "high",
+    "bstp_nmix_lwpr": "low",
+    "bstp_nmix_prpr": "close",
+    "acml_vol": "volume",
+    "acml_tr_pbmn": "value",
+}
+
+
+# KIS 주식 일봉 응답 컬럼 → 내부 스키마
 DAILY_BAR_FIELDS = {
     "stck_bsop_date": "date",     # YYYYMMDD 문자열
     "stck_oprc": "open",

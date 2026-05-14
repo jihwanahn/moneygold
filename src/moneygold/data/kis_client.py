@@ -317,6 +317,54 @@ class KISClient:
         return _normalize_bars(ticker, all_rows, start_inclusive=start, end_inclusive=end)
 
 
+    # ---------- Index bars ----------
+
+    def fetch_index_bars(
+        self,
+        index_code: str,
+        start: str,
+        end: str,
+    ) -> pd.DataFrame:
+        """지수 일봉. INDEX_CODES에서 index_code 조회 (KOSPI/KOSDAQ/KOSPI200/KOSDAQ150).
+
+        주식과 같은 페이지네이션 전략 (기간 자르기).
+        """
+        if start > end:
+            return _empty_bars_df()
+        if index_code not in ep.INDEX_CODES:
+            raise ValueError(f"unknown index_code: {index_code}. Use one of {list(ep.INDEX_CODES)}")
+        iscd = ep.INDEX_CODES[index_code]
+
+        all_rows: list[dict[str, Any]] = []
+        cur_end = end
+        seen_oldest = None
+        while True:
+            params = {
+                "FID_COND_MRKT_DIV_CODE": "U",  # 업종지수
+                "FID_INPUT_ISCD": iscd,
+                "FID_INPUT_DATE_1": start,
+                "FID_INPUT_DATE_2": cur_end,
+                "FID_PERIOD_DIV_CODE": "D",
+            }
+            data = self._get(ep.Path.INDEX_DAILY_CHART, ep.TrId.INDEX_DAILY_CHART, params)
+            rows = data.get("output2", []) or []
+            if not rows:
+                break
+            all_rows.extend(rows)
+            oldest = rows[-1].get("stck_bsop_date")
+            if not oldest or oldest <= start:
+                break
+            if seen_oldest is not None and oldest >= seen_oldest:
+                log.warning("Index pagination didn't advance (code=%s oldest=%s), aborting", index_code, oldest)
+                break
+            seen_oldest = oldest
+            cur_end = _prev_day(oldest)
+            if cur_end < start:
+                break
+
+        return _normalize_index_bars(index_code, all_rows, start, end)
+
+
 # ============================================================
 # Normalization helpers (모듈 함수, 단위 테스트 용이)
 # ============================================================
@@ -366,3 +414,33 @@ def _prev_day(yyyymmdd: str) -> str:
     """YYYYMMDD 문자열에서 -1일 (캘린더). 주말은 KIS가 알아서 빈 응답으로 처리."""
     d = datetime.strptime(yyyymmdd, "%Y%m%d") - timedelta(days=1)
     return d.strftime("%Y%m%d")
+
+
+def _normalize_index_bars(index_code: str, rows: list[dict[str, Any]], start_inclusive: str, end_inclusive: str) -> pd.DataFrame:
+    """KIS index output2 → 표준 DataFrame. 컬럼명이 주식과 달라서 별도."""
+    cols_out = ["index_code", "date", "open", "high", "low", "close", "volume", "value"]
+    if not rows:
+        return pd.DataFrame(columns=cols_out)
+    df = pd.DataFrame(rows)
+    keep = [c for c in ep.INDEX_BAR_FIELDS if c in df.columns]
+    df = df[keep].rename(columns=ep.INDEX_BAR_FIELDS).copy()
+
+    for c in ("open", "high", "low", "close"):
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    df = df.dropna(subset=["date", "open", "high", "low", "close"])
+    for c in ("open", "high", "low", "close"):
+        df[c] = df[c].astype(float)
+    for c in ("volume", "value"):
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype("int64")
+        else:
+            df[c] = 0
+
+    df["date"] = df["date"].astype(str)
+    df["index_code"] = index_code
+
+    df = df[(df["date"] >= start_inclusive) & (df["date"] <= end_inclusive)]
+    df = df.drop_duplicates(subset=["date"], keep="first")
+    df = df.sort_values("date").reset_index(drop=True)
+    return df[cols_out]

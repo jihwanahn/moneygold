@@ -122,3 +122,66 @@ class DataSync:
             else:
                 stats["no_change"] += 1
         return stats
+
+    # ----------- Index bars -----------
+
+    def backfill_index(
+        self,
+        index_code: str,
+        *,
+        years: int = 2,
+        asof: str | None = None,
+    ) -> BackfillResult:
+        """한 지수의 일봉을 incremental 백필. 종목과 같은 로직."""
+        end = asof or datetime.now().strftime("%Y%m%d")
+        path = store.index_path(self.data_dir, index_code)
+        existing = store.read_parquet_safe(path)
+
+        if existing is None or existing.empty:
+            start_dt = datetime.strptime(end, "%Y%m%d") - timedelta(days=years * 365)
+            start = start_dt.strftime("%Y%m%d")
+        else:
+            latest = str(existing["date"].max())
+            next_dt = datetime.strptime(latest, "%Y%m%d") + timedelta(days=1)
+            start = next_dt.strftime("%Y%m%d")
+            if start > end:
+                return BackfillResult(index_code, 0, 0, 0)
+
+        try:
+            df = self.kis.fetch_index_bars(index_code, start, end)
+        except KISAPIError as e:
+            return BackfillResult(index_code, 0, 0, 0, error=f"KIS {e.rt_cd}: {e.msg}")
+        except Exception as e:
+            return BackfillResult(index_code, 0, 0, 0, error=str(e))
+
+        fetched = len(df)
+        if fetched == 0:
+            return BackfillResult(index_code, 0, 0, 0)
+
+        added, skipped = store.append_dedup(
+            path, df, dedup_keys=["date"], sort_keys=["date"]
+        )
+        return BackfillResult(index_code, added=added, skipped=skipped, fetched=fetched)
+
+    def sync_indices(
+        self,
+        index_codes: list[str] | None = None,
+        *,
+        years: int = 2,
+        asof: str | None = None,
+    ) -> dict:
+        """기본 4개 지수 (KOSPI/KOSDAQ/KOSPI200/KOSDAQ150) sync."""
+        codes = index_codes or ["KOSPI", "KOSDAQ", "KOSPI200", "KOSDAQ150"]
+        stats = {"total": len(codes), "updated": 0, "no_change": 0, "failed": []}
+        for code in codes:
+            r = self.backfill_index(code, years=years, asof=asof)
+            if r.error:
+                stats["failed"].append((code, r.error))
+                log.warning("Index %s failed: %s", code, r.error)
+            elif r.added > 0:
+                stats["updated"] += 1
+                log.info("Index %s: +%d rows", code, r.added)
+            else:
+                stats["no_change"] += 1
+                log.info("Index %s: no change", code)
+        return stats
