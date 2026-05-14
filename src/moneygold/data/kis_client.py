@@ -212,29 +212,52 @@ class KISClient:
     # ---------- HTTP ----------
 
     def _get(self, path: str, tr_id: str, params: dict[str, Any]) -> dict[str, Any]:
-        """rate-limit → GET → 401 시 토큰 재발급 후 1회 재시도. KIS 응답 dict 반환."""
+        """rate-limit → GET → 401(토큰만료) / 429(rate) / 5xx(일시) 재시도. KIS 응답 dict 반환.
+
+        최대 5회 시도, 5xx는 지수 백오프 (1, 2, 4초).
+        """
         url = self.cfg.base_url + path
-        for attempt in (1, 2):
+        max_attempts = 5
+        backoff_5xx = [1.0, 2.0, 4.0, 8.0]
+
+        last_err: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
             self.limiter.acquire()
             headers = self._auth_headers(tr_id)
-            r = self.session.get(url, headers=headers, params=params, timeout=self.timeout)
-            if r.status_code == 401 and attempt == 1:
-                log.warning("401 from KIS, re-issuing token")
+            try:
+                r = self.session.get(url, headers=headers, params=params, timeout=self.timeout)
+            except requests.RequestException as e:
+                last_err = e
+                wait = backoff_5xx[min(attempt - 1, len(backoff_5xx) - 1)]
+                log.warning("network error on attempt %d: %s, retrying in %.1fs", attempt, e, wait)
+                time.sleep(wait)
+                continue
+
+            if r.status_code == 401:
+                log.warning("401 from KIS, re-issuing token (attempt %d)", attempt)
                 with self._token_lock:
                     self._token = self._issue_token()
                 continue
             if r.status_code == 429:
-                log.warning("429 rate limit, backing off 2s")
+                log.warning("429 rate limit (attempt %d), backing off 2s", attempt)
                 time.sleep(2.0)
                 continue
+            if 500 <= r.status_code < 600:
+                wait = backoff_5xx[min(attempt - 1, len(backoff_5xx) - 1)]
+                log.warning("%d from KIS (attempt %d), retrying in %.1fs", r.status_code, attempt, wait)
+                time.sleep(wait)
+                continue
+
             r.raise_for_status()
             data = r.json()
             rt_cd = str(data.get("rt_cd", ""))
             if rt_cd not in ("0", ""):
-                # KIS는 정상=0, 그 외 에러
                 raise KISAPIError(rt_cd, str(data.get("msg1", "")), data)
             return data
-        raise RuntimeError("unreachable")
+
+        if last_err is not None:
+            raise last_err
+        raise RuntimeError(f"KIS GET {path} failed after {max_attempts} attempts")
 
     # ---------- Daily bars ----------
 

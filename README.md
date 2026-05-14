@@ -19,14 +19,16 @@ KOSPI/KOSDAQ 스윙 트레이딩 시그널 생성기. Weinstein Stage Analysis +
 ## 셋업
 
 ```bash
-# 1) 가상환경 + 의존성
-python3.11 -m venv .venv
-source .venv/bin/activate
+# 1) 가상환경 + 의존성 (conda 권장)
+conda create -n moneygold python=3.11 -y
+conda activate moneygold
 pip install -e ".[dev]"
 
 # 2) 환경변수
 cp .env.example .env
-# .env 열어서 KIS_APP_KEY / KIS_APP_SECRET / KIS_ACCOUNT_NO 채우기
+# .env 열어서 채우기:
+#   KIS_APP_KEY / KIS_APP_SECRET / KIS_ACCOUNT_NO  (KIS API)
+#   KRX_ID / KRX_PW                                 (pykrx가 KRX 로그인 요구)
 
 # 3) KIS 사전검증 (PR1 진입 전 필수)
 python scripts/verify_kis.py
