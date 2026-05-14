@@ -1,0 +1,7 @@
+data/*
+pykrx_cache/*
+result/*
+dart_cache/*
+debug_dart/*
+config.json
+__pycache__
