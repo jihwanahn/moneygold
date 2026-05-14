@@ -131,8 +131,9 @@ store/
 | `atr(high, low, close, n=20)` | True Range의 n-period Wilder smoothing |
 | `rolling_high(high, n)` / `rolling_low(low, n)` | 롤링 max/min — **고가/저가 기준** |
 | `slope_normalized(series, lookback)` | 최근 lookback 봉 선형회귀 기울기 ÷ 평균값. 부호 + 크기 비교 가능 |
-| `rs_line(stock_close, index_close)` | `stock_close / index_close * 100` (베이스 정규화 100) |
-| `rs_rank(rs_lines_today: pd.Series)` | 입력: 같은 날짜의 종목별 RS line 값. 횡단면 백분위 0~100 |
+| `rs_line(stock_close, index_close)` | (stock/index) 시계열, **시작점 100으로 정규화**. Stage 분류기의 RS slope(시간 변화)에만 사용 — 횡단면 비교용 아님 |
+| `rs_momentum(close, periods, weights)` | IBD-style 4Q 가중 수익률 스칼라. 기본: 63d×40% + 126d×20% + 189d×20% + 252d×20%. 데이터 부족 시 NaN |
+| `rs_rank(scores: pd.Series)` | 종목별 `rs_momentum` 결과의 횡단면 백분위 0~100. 시장(KOSPI/KOSDAQ)별 분리 계산 |
 | `volume_ratio(vol, n=50)` | `vol / sma(vol, n)` |
 
 **RS rank는 시장별 분리 계산.** KOSPI 종목은 KOSPI200 지수 대비 RS line → KOSPI 종목들끼리 백분위. KOSDAQ도 동일. 두 그룹 백분위를 그대로 사용 (시장 간 합산 랭킹 X).

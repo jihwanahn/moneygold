@@ -92,25 +92,66 @@ def slope_normalized(series: pd.Series, lookback: int) -> pd.Series:
 # ============================================================
 
 def rs_line(stock_close: pd.Series, index_close: pd.Series) -> pd.Series:
-    """RS line = stock / index * 100. 두 시리즈의 인덱스(date) 정렬 후 계산.
+    """RS line = (stock/index) 시계열, 시작점을 100으로 정규화.
 
-    공통 인덱스만 사용. NaN 일자는 결과에서 제외.
+    시계열 추세 분석용 (Stage 분류기의 RS slope 계산 등). **횡단면 비교용 아님** —
+    종목간 RS rank는 `rs_momentum` + `rs_rank` 조합 사용.
+
+    공통 인덱스(날짜)만 사용. 시작점이 NaN/0이면 정규화 못해서 빈 Series.
     """
     df = pd.concat([stock_close.rename("s"), index_close.rename("i")], axis=1, join="inner").dropna()
     if df.empty:
         return pd.Series(dtype=float)
-    return (df["s"] / df["i"]) * 100.0
+    ratio = df["s"] / df["i"]
+    base = ratio.iloc[0]
+    if base == 0 or pd.isna(base):
+        return pd.Series(dtype=float)
+    return ratio / base * 100.0
 
 
-def rs_rank(rs_lines_today: pd.Series) -> pd.Series:
+# IBD 표준 weighting: 직전 1Q 40%, 2Q 20%, 3Q 20%, 4Q 20%
+RS_MOMENTUM_PERIODS = (63, 126, 189, 252)
+RS_MOMENTUM_WEIGHTS = (0.40, 0.20, 0.20, 0.20)
+
+
+def rs_momentum(
+    close: pd.Series,
+    periods: tuple[int, ...] = RS_MOMENTUM_PERIODS,
+    weights: tuple[float, ...] = RS_MOMENTUM_WEIGHTS,
+) -> float:
+    """IBD-style 가중 모멘텀 (스칼라 1개).
+
+    각 period에 대해 last_close / close[-period-1] - 1 계산 후 weights로 가중합.
+    데이터 부족(< max(periods)+1)이면 NaN.
+
+    이 값을 종목별로 모아 `rs_rank`에 넣으면 진짜 IBD-style RS rating이 나옴.
+    """
+    if len(periods) != len(weights):
+        raise ValueError("periods와 weights 길이 불일치")
+    n = len(close)
+    if n < max(periods) + 1:
+        return float("nan")
+    last = float(close.iloc[-1])
+    if last == 0 or pd.isna(last):
+        return float("nan")
+    weighted = 0.0
+    for p, w in zip(periods, weights):
+        prev = float(close.iloc[-p - 1])
+        if prev == 0 or pd.isna(prev):
+            return float("nan")
+        weighted += w * (last / prev - 1.0)
+    return weighted
+
+
+def rs_rank(scores: pd.Series) -> pd.Series:
     """횡단면 백분위 0~100.
 
-    입력: 같은 날짜의 종목별 RS line 값(Series, index=ticker, values=RS line scalar).
+    입력: 종목별 `rs_momentum` 결과 (Series, index=ticker, values=수익률 스칼라).
     출력: 같은 인덱스의 백분위 (높을수록 강세).
     """
-    if rs_lines_today.empty:
+    if scores.empty:
         return pd.Series(dtype=float)
-    return rs_lines_today.rank(pct=True, na_option="keep") * 100.0
+    return scores.rank(pct=True, na_option="keep") * 100.0
 
 
 # ============================================================

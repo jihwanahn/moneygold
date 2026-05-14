@@ -73,7 +73,7 @@ def _compute_one(
     sma_30w = ind.sma(close, sma_window)
     sma_slope = ind.slope_normalized(sma_30w, slope_lookback)
 
-    # RS line
+    # RS line (시계열 — slope 계산용, 시작점 정규화 100)
     close_by_date = close.copy()
     close_by_date.index = bars["date"]
     rs = ind.rs_line(close_by_date, idx_close)
@@ -81,6 +81,9 @@ def _compute_one(
 
     if rs.empty:
         return None
+
+    # RS momentum (스칼라 — 횡단면 랭킹용. IBD-style 4Q weighted return)
+    rs_mom = ind.rs_momentum(close)
 
     last_close = float(close.iloc[-1])
     last_sma = float(sma_30w.iloc[-1]) if pd.notna(sma_30w.iloc[-1]) else float("nan")
@@ -97,6 +100,7 @@ def _compute_one(
         "sma_30w_slope": last_sma_slope,
         "rs_line": last_rs,
         "rs_line_slope": last_rs_slope,
+        "rs_momentum": rs_mom,
         "stage": stage_val,
     }
 
@@ -160,10 +164,10 @@ def main(argv: list[str] | None = None) -> int:
 
     out = pd.DataFrame(results)
 
-    # RS rank 시장별 분리 계산
+    # RS rank: rs_momentum (IBD-style 4Q weighted return)의 시장별 횡단면 백분위
     out["rs_rank"] = float("nan")
     for market, group in out.groupby("market"):
-        ranked = ind.rs_rank(group["rs_line"])
+        ranked = ind.rs_rank(group["rs_momentum"])
         out.loc[ranked.index, "rs_rank"] = ranked
 
     # 분포 출력
@@ -181,7 +185,7 @@ def main(argv: list[str] | None = None) -> int:
     stage2["name"] = stage2["ticker"].map(name_map)
 
     print(f"\n=== Stage 2 top {min(args.top, len(stage2))} by RS rank ===")
-    cols_to_print = ["ticker", "name", "market", "close", "rs_rank", "rs_line_slope", "sma_30w_slope"]
+    cols_to_print = ["ticker", "name", "market", "close", "rs_rank", "rs_momentum", "rs_line_slope", "sma_30w_slope"]
     print(stage2[cols_to_print].head(args.top).to_string(index=False, float_format=lambda x: f"{x:>10.3f}"))
 
     if args.export:

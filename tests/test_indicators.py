@@ -96,12 +96,29 @@ def test_slope_normalized_invalid_lookback():
 
 # ----------------- RS line / rank -----------------
 
-def test_rs_line_aligns_and_computes():
+def test_rs_line_starts_at_100():
+    """rs_line은 시작점이 100. 그 뒤로 상대 변화."""
     stock = pd.Series([100, 110, 121], index=["d1", "d2", "d3"], dtype=float)
     idx = pd.Series([2000, 2100, 2200], index=["d1", "d2", "d3"], dtype=float)
     rs = ind.rs_line(stock, idx)
-    assert rs.iloc[0] == pytest.approx(100.0 / 2000.0 * 100)
-    assert rs.iloc[2] == pytest.approx(121.0 / 2200.0 * 100)
+    assert rs.iloc[0] == pytest.approx(100.0)
+    # 종목 +21%, 지수 +10% → ratio 1.21/2200 = 0.55 vs base 0.05 → 1.1
+    # rs[-1] = (121/2200) / (100/2000) * 100 = 0.055/0.05 * 100 = 110
+    assert rs.iloc[-1] == pytest.approx(110.0)
+
+
+def test_rs_line_stock_outperforms_index_rises_above_100():
+    stock = pd.Series([100, 200], index=["d1", "d2"], dtype=float)  # +100%
+    idx = pd.Series([2000, 2200], index=["d1", "d2"], dtype=float)   # +10%
+    rs = ind.rs_line(stock, idx)
+    assert rs.iloc[-1] > 100
+
+
+def test_rs_line_stock_underperforms_drops_below_100():
+    stock = pd.Series([100, 105], index=["d1", "d2"], dtype=float)   # +5%
+    idx = pd.Series([2000, 2400], index=["d1", "d2"], dtype=float)   # +20%
+    rs = ind.rs_line(stock, idx)
+    assert rs.iloc[-1] < 100
 
 
 def test_rs_line_inner_join_only():
@@ -119,10 +136,40 @@ def test_rs_line_empty_when_no_overlap():
     assert rs.empty
 
 
+# ----------------- rs_momentum / rs_rank (IBD-style) -----------------
+
+def test_rs_momentum_constant_close_zero():
+    close = pd.Series([100.0] * 300)
+    assert ind.rs_momentum(close) == pytest.approx(0.0)
+
+
+def test_rs_momentum_uptrend_positive():
+    # 매일 +0.1% → 252일이면 약 +28.5%
+    close = pd.Series(100.0 * (1.001 ** np.arange(300)))
+    score = ind.rs_momentum(close)
+    assert score > 0.10
+
+
+def test_rs_momentum_downtrend_negative():
+    close = pd.Series(100.0 * (0.999 ** np.arange(300)))
+    score = ind.rs_momentum(close)
+    assert score < -0.10
+
+
+def test_rs_momentum_insufficient_data():
+    close = pd.Series([100.0] * 100)
+    assert pd.isna(ind.rs_momentum(close))
+
+
+def test_rs_momentum_weights_must_match_periods():
+    close = pd.Series([100.0] * 300)
+    with pytest.raises(ValueError):
+        ind.rs_momentum(close, periods=(63, 126), weights=(0.5, 0.3, 0.2))
+
+
 def test_rs_rank_percentile():
-    s = pd.Series({"A": 10.0, "B": 20.0, "C": 30.0, "D": 40.0})
+    s = pd.Series({"A": -0.1, "B": 0.0, "C": 0.5, "D": 1.0})
     r = ind.rs_rank(s)
-    # 가장 작은 게 25, 가장 큰 게 100 (4분위 백분위)
     assert r["A"] == pytest.approx(25.0)
     assert r["D"] == pytest.approx(100.0)
 
@@ -130,6 +177,13 @@ def test_rs_rank_percentile():
 def test_rs_rank_empty():
     r = ind.rs_rank(pd.Series(dtype=float))
     assert r.empty
+
+
+def test_rs_rank_nan_propagated():
+    s = pd.Series({"A": np.nan, "B": 0.5, "C": 1.0})
+    r = ind.rs_rank(s)
+    assert pd.isna(r["A"])
+    assert r["C"] == pytest.approx(100.0)
 
 
 # ----------------- volume_ratio -----------------
