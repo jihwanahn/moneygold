@@ -1,7 +1,40 @@
-data/*
-pykrx_cache/*
-result/*
-dart_cache/*
-debug_dart/*
-config.json
-__pycache__
+# Secrets
+.env
+.env.local
+*.pem
+*.key
+
+# Data & caches
+store/
+result/
+*.parquet
+*.feather
+
+# KIS token cache
+.kis_token.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Venv
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store

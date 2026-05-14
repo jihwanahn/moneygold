@@ -4,57 +4,59 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Korean (KOSPI/KOSDAQ) equity screening + LLM advisory pipeline. The code is Python scripts with no package metadata — there's no `requirements.txt`, `pyproject.toml`, or virtualenv config. Comments and prompts are in Korean.
+moneygold v2 — KOSPI/KOSDAQ 스윙 트레이딩 **시그널 생성기**. Weinstein Stage + Minervini Trend Template + Darvas Box 합성. **자동 주문 없음** (read-only로 KIS API 사용, 사용자가 HTS/MTS에서 수동 매매).
 
-## Running
+전체 설계는 [ARCHITECTURE.md](./ARCHITECTURE.md)에 있고, 이 파일은 거기서 못 보는 운영/협업 메모만.
 
-There are two entry points; both must be invoked from the repo root (paths in `constants.py` and cache dirs are relative):
+## Project state
 
-- `python screen.py` — broad screening across KRX. Pulls `data/screening_history.json`, decides which previously-seen tickers are stale enough to re-advise (refresh cadence depends on last `action`: BUY=1d → SELL=30d), explores up to 5 new candidates, then runs Screener → Analyzer → Advisor and writes back to the history file.
-- `python track.py` — focused pass over `data/user_interest.json` only (no exploration, no history mutation). Prints the advice JSON for each ticker.
+PR0(스캐폴드 + KIS 사전검증 스크립트) 완료. 이후 PR1~PR6은 ARCHITECTURE.md §14 로드맵 참조. 현재 `src/moneygold/` 하위 모듈들은 대부분 빈 파일 — 각 PR에서 채워나감. 빈 모듈을 import해도 동작하지 않는 게 정상.
 
-Both scripts call `login_krx()` first, which logs into `data.krx.co.kr` using credentials from `config.json` and monkey-patches `pykrx.website.comm.webio` so all subsequent pykrx calls reuse the authenticated `requests.Session`. Without a valid login, pykrx fetches will fail or be rate-limited.
+레거시 v1 코드(`screener.py`/`analyzer.py`/`advisor.py`/`screen.py`/`track.py`)는 git history에는 남아있지만 작업 트리에선 완전 삭제됨. `git log --diff-filter=D --name-only -1` 로 확인 가능.
 
-## Required secrets (not in repo)
+## Setup
 
-- `config.json` — `{"id": ..., "password": ...}` for KRX login. The committed file holds Korean placeholders (`"아이디"`, `"비밀번호"`).
-- `DART_API_KEY` in `analyzer.py:26` — hardcoded constant currently set to the placeholder `"다트 키"`. Replace with a real OpenDART key before running anything that touches the Analyzer stage.
-- `OPENAI_API_KEY` (or `GOOGLE_API_KEY` if switching providers) — read from environment by langchain.
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+cp .env.example .env  # 후 KIS_APP_KEY / KIS_APP_SECRET 채우기
+python scripts/verify_kis.py  # PR1 진입 전 사전검증
+```
 
-## Pipeline architecture
+## Architecture (한 줄씩)
 
-Three stages, each implemented as a class in its own module and chained by `screen.py` / `track.py`:
+- `src/moneygold/config.py` — `.env` 로드, 동결 dataclass로 설정 노출. **모든 파라미터는 여기 통과**.
+- `src/moneygold/data/` — KIS 클라이언트, parquet 스토어, MCP 래퍼, 일일 sync.
+- `src/moneygold/{indicators,stage,template,darvas,signals}.py` — 전략 코어. 위에서 아래로 의존 (signals가 stage/template/darvas를 합성).
+- `src/moneygold/{portfolio,sizing}.py` — 보유 종목 상태(KIS 잔고 truth) + 사이즈 가이드.
+- `src/moneygold/{backtest,report,notify}.py` — 검증, 출력, 알림.
+- `src/moneygold/cli/` — `python -m moneygold.cli.<name>` 진입점들.
+- `scripts/verify_kis.py` — PR0 사전검증. PR1 진입 전 반드시 통과해야 함.
 
-1. **Screener** (`screener.py`) — KRX market data via `pykrx`.
-   - Stage 1 (`build_universe`): fetch fundamentals + market cap for the full market, filter by MCAP ≥ 50B KRW and trading value ≥ 300M KRW, keep top 400 by a rough PBR/PER/DIV composite.
-   - Stage 2 (`add_mom_vol`): pull cached OHLCV per ticker to compute 120-day momentum and 60-day return volatility.
-   - Scoring (`score_and_rank`): winsorize + percentile-rank PBR/PER/DIV/MOM/VOL, weighted-sum into `SCORE`. The ranked DF is then split into `tracking_tickers` (forced in) + top-`exploration` from the unvisited pool. `build_user_interest_df` is the parallel path used by `track.py` — same column shape, no scoring.
-   - Output: `result/screener/{biz_date}/{ticker}.json` (one file per ticker, the per-item dict from `build_batch`).
+## 코드 작성 시 못박힌 원칙
 
-2. **Analyzer** (`analyzer.py`, ~1.3k lines, the heaviest module) — DART (OpenDART) financial-statement enrichment via `dart-fss` + raw HTTP.
-   - Maps KRX ticker → DART `corp_code`, then `fetch_latest_n_fnltt_by_rcept_dt` walks disclosures by `rcept_dt` (filing date, not fiscal date) and de-dupes restatements per `(bsns_year, reprt_code)`.
-   - Statements are pulled via `fnlttSinglAcntAll.json` with CFS-then-OFS fallback (`_fetch_fnltt_best_effort_with_fsdiv_cached`).
-   - Reports come as **cumulative** values; `_periodize_metrics_from_cumulative` subtracts prior quarters within the same fiscal year to produce stand-alone quarterly metrics. To do this it needs the Q1/H1/Q3/Annual reports for that year — missing ones are back-filled by `_ensure_year_reports_for_periodize`.
-   - Account matching is keyword-based against `account_nm` (see `REVENUE_KEYS`, `OP_KEYS`, `NI_KEYS`, `CAPEX_KEYS` near the top), with normalization in `_normalize_fnltt_df` (NBSP/space stripping, fullwidth parens).
-   - `decorate_dart_to_quant` is the public entry called by both runners; it returns the screener payload plus `financials_dart` and `events_dart` (recent CB/BW/EB issuances).
-   - Output: `result/analyzer/{biz_date}/{ticker}.json`.
-   - Debug: setting `DEBUG_TICKER` (currently `"0004V0"`) dumps raw DART rows, IS/CF blocks, and keyword hits to `./debug_dart/` whenever extraction misses a field. Set to `None` to disable.
+- **재현성.** 모든 함수에 `asof: str` 또는 명시적 날짜를 받기. `datetime.now()` 호출 금지 (CLI 진입점에서만 1회).
+- **순수 함수 우선.** `indicators.py`는 `pd.Series → pd.Series`, 외부 호출 없음.
+- **Parquet 원자성.** 쓰기는 항상 tmp + atomic rename. `data/store.py` 헬퍼 사용.
+- **(ticker, date) unique.** Append 시 중복 거부.
+- **자동 주문 금지.** KIS 주문 엔드포인트(`order-cash` 등) 코드에 들어가면 안 됨. PR 분기점에서 발견되면 즉시 reject.
+- **단일 책임의 시그널 레이어.** `signals.py`가 BUY/HOLD/SELL을 결정. 다른 모듈은 신호를 생성/관찰만, 결정 안 함.
 
-3. **Advisor** (`advisor.py`) — wraps a langchain chat model (`build_llm` supports OpenAI with `web_search_preview` tool binding, or Gemini without tool binding) with a Korean system prompt that demands a single-JSON-object response (no markdown, no code fences). Output is written verbatim as `result/advisor/{asof}/{ticker}{postfix}.txt`. `screen.py` then `json.loads`-es it to extract `action` for the history update.
+## 자주 쓸 명령
 
-## Caching layout
+```bash
+pytest                           # 테스트
+ruff check src tests            # 린트
+python scripts/verify_kis.py    # KIS 사전검증
+python -m moneygold.cli.sync    # (PR1+) 데이터 동기화
+python -m moneygold.cli.signals # (PR3+) 일일 시그널
+python -m moneygold.cli.backtest # (PR4+) 백테스트
+python -m moneygold.cli.daily   # (PR6+) 종합 일일 실행 (sync → portfolio → signals → notify)
+```
 
-All caches are parquet/JSON on disk; cache hits skip the network. None of these are checked in (`.gitignore` covers them).
+## 변경 시 주의
 
-- `pykrx_cache/` — market-wide fundamentals/cap (per `biz_date` × `market`), per-ticker OHLCV (`ohlcv_{ticker}_{start}_{end}.parquet`), and investor trading-value/volume timeseries. Wrappers: `_cached_df`, `get_ohlcv_cached`.
-- `dart_cache/` — `fnltt_{corp_code}_{year}_{reprt_code}_{fs_div}.parquet` plus a `.meta.json` sidecar containing `rcept_no`. On read, if the caller passes `expected_rcept_no` and it disagrees with the sidecar, the cache is invalidated (handles DART restatements).
-- `debug_dart/` — only populated when `DEBUG_TICKER` matches.
-- `result/` — final outputs, organized as `result/{screener|analyzer|advisor}/{biz_date}/{ticker}.{json|txt}`. Both runners check `os.path.exists` on these and skip stages whose output is already cached, so deleting a single file is the way to force a re-run for one ticker.
-
-## Things to know before editing
-
-- `screener.py` and `analyzer.py` both define `get_biz_date()` and `_load_parquet/_save_parquet` — they are intentionally separate copies (different cache atomicity behavior in analyzer).
-- `screen.py` and `track.py` duplicate the KRX login + `webio` monkey-patch block verbatim; changes to login flow must be made in both.
-- `screen.py:237-240` has a known bug: the loop assigns `each["action"] = action` using the *last* `action` from the prior loop's local scope, not the per-ticker value from `history_update`. Don't propagate this pattern.
-- The Analyzer's REQ_SLEEP (0.25s) gates every DART call — lowering it triggers rate limits; raising it makes a fresh run on a large screen take a long time. Cache reuse is the real speedup.
-- The Advisor's expected output is strict JSON; the prompt explicitly forbids backticks/markdown. If you change the prompt template (`USER_PROMPT_TEMPLATE` in `advisor.py`), make sure `screen.py`'s `json.loads(advice)` still works or it will silently fall into the `Manual Adjustment Required` branch and skip the history update.
+- ARCHITECTURE.md의 파라미터 표(§4 Stage, §5 Template, §6 Darvas, §13 env)는 백테스트(PR4) 결과로 *변경될 예정*. 코드는 모든 파라미터를 `config.py` 경유로 받아야 하며 하드코딩 금지.
+- PR4 백테스트 결과는 ARCHITECTURE.md §2의 PR0 검증 결과에 의존. 폐지 종목 데이터 미확보가 확정되면 §10 백테스트 섹션에 *생존편향 경고*를 결과 헤더로 출력하도록 구현 필요.
+- 시그널 출력 JSON 스키마는 `report.py`/`notify.py` 양쪽이 같이 쓰므로, 변경 시 둘 다 갱신.
