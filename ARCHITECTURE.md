@@ -62,11 +62,19 @@ KIS 클라이언트 운영 디테일:
 - **연속조회 (`tr_cont` / `ctx_area_*`)** 페이지네이션
 - **base URL** 실전: `https://openapi.koreainvestment.com:9443`. 모의 사용 안 함.
 
-### PR0에서 검증해야 하는 데이터 위험 (Critical)
+### PR0 검증 결과 (확정)
 
-1. **2년 일봉 백필 가능?** KIS `inquire-daily-itemchartprice`가 100건/요청에 과거 깊이 제약이 있을 수 있음 — 종목당 ~500봉을 한 종목 단위로 받아낼 수 있는지 5종목 샘플로 사전 호출.
-2. **종목 마스터 출처.** KIS는 전체 KOSPI/KOSDAQ 마스터 일괄 다운로드 엔드포인트가 깔끔하지 않음. 후보: (a) KRX 종목 마스터 다운로드 파일, (b) KIS 조건검색/업종 코드 순회, (c) pykrx `get_market_ticker_list` 한 번만 사용. PR0에서 결정.
-3. **상장폐지 종목 과거 데이터.** KIS는 일반적으로 상장 중인 종목만 시세 제공 → 백테스트 생존편향 폭발. 후보: (a) KRX 폐지목록 + 별도 데이터셋, (b) 백테스트는 "현재 상장 중인 종목"만으로 한정하고 편향을 인지/문서화. PR0에서 결정. **이게 안 되면 PR4 백테스트 결과는 낙관적 편향됨을 ARCHITECTURE에 명시.**
+`scripts/verify_kis.py` 실행으로 확정된 사실:
+
+1. **2년 일봉 백필 → 페이지네이션 필요.** `inquire-daily-itemchartprice`는 한 호출에 최근 100영업일치(약 5개월)만 반환. `tr_cont` 헤더가 안 붙음. 2년치(약 500영업일)는 **요청 기간을 잘라가며 5회 반복 호출**로 받는다:
+   - 최초: `FID_INPUT_DATE_2 = 오늘`, `FID_INPUT_DATE_1 = 오늘-730일`
+   - 다음: 받은 응답의 가장 *오래된* 날짜 - 1영업일을 새 `FID_INPUT_DATE_2`로, 같은 시작일 유지
+   - 반환 rows가 0이거나 누적 기간이 목표에 도달하면 종료
+   - 호출당 0.3초 throttle 가정 시 종목당 약 2초
+
+2. **종목 마스터 → pykrx 전용 의존성.** KIS는 전종목 리스트 미제공 확정. `pykrx.stock.get_market_ticker_list(market='KOSPI'|'KOSDAQ')` 를 마스터 sync에서만 호출. 본 문서의 "pykrx 미사용" 원칙을 **"pykrx는 종목 마스터에 한정 사용"** 으로 완화.
+
+3. **상장폐지 종목 과거 데이터 → KIS 미제공 (확정).** 폐지된 종목(037160 등)은 응답이 빈 배열. 동일 코드가 재할당된 경우(011000, 003540)는 새 회사의 데이터만 옴. **v1 백테스트는 "현재 상장 중인 종목"만으로 시뮬레이션**하고, 결과 리포트 헤더에 *낙관적 생존편향* 경고를 명시. KRX 폐지 데이터 확보는 v2 과제.
 
 ### 2차 출처: korea-stock-analyzer MCP
 
@@ -80,9 +88,17 @@ KIS 클라이언트 운영 디테일:
 
 MCP 결과는 모두 로컬 캐시 (`store/mcp_cache/{tool}/{asof}__{ticker}.json`). 같은 (도구, 날짜, 종목) 조합은 두 번 안 부른다.
 
-### 3차 출처: pykrx
+### 3차 출처: pykrx — 종목 마스터 전용
 
-**기본 미사용.** PR0에서 종목 마스터/폐지목록 출처로 결정되면 그 용도만 한정해서 의존성 유지. 시세는 KIS가 전담.
+PR0 검증 결과(§2)에 따라 **종목 마스터 sync에 한정**해서 사용. 시세·수급·잔고는 KIS, 펀더멘털·뉴스는 MCP. 즉 pykrx는 `universe.py`의 마스터 갱신 1군데만.
+
+```python
+from pykrx import stock
+kospi_tickers = stock.get_market_ticker_list(market="KOSPI")
+kosdaq_tickers = stock.get_market_ticker_list(market="KOSDAQ")
+```
+
+마스터 갱신은 일주일 1회 또는 거래일 시작 시 1회면 충분 (신규 상장은 흔치 않음). pykrx의 KRX 스크래핑이 깨질 가능성 — 갱신 실패 시 기존 마스터로 운영 계속, 알림으로 경고.
 
 ### 로컬 데이터 스토어
 
@@ -425,7 +441,7 @@ for biz_date in trading_days(start, end):
 - 수수료: 매수/매도 각 0.015%, 매도 시 거래세 0.2%
 - 거래정지/관리종목 편입 시점 정확히 반영 (`meta/flags.parquet`)
 - adj_factor 변화 반영 (박스 리셋)
-- **생존편향**: §2의 PR0 검증 결과에 따름. 폐지 종목 데이터 미확보 시 *낙관적 편향*임을 결과 리포트 헤더에 명시.
+- **생존편향**: KIS 폐지 종목 데이터 미제공 확정 (§2 PR0 결과). "현재 상장 중인 종목"만 시뮬레이션 → 결과는 *낙관적 편향*. 리포트 헤더에 반드시 다음 같은 경고 출력: `⚠️ 이 백테스트는 현재 KIS에서 조회 가능한 종목만 포함합니다. 상장폐지된 종목은 빠져 있어 결과가 실제보다 우호적일 수 있습니다.`
 
 ## 11. Korean Market 특이사항
 
@@ -552,7 +568,7 @@ BENCHMARK_INDEX=KOSPI    # 백테스트 비교 지수
 
 | PR | 범위 | 외부 의존 |
 | --- | --- | --- |
-| **PR0** | `git init` + 레거시 격리/삭제 + 본 문서 + `.gitignore`/`pyproject.toml`/`.env.example` 스켈레톤 + **KIS 사전검증 (2년 백필·종목마스터·폐지종목)** | KIS 키 |
+| **PR0** ✅ | `git init` + 레거시 격리/삭제 + 본 문서 + `.gitignore`/`pyproject.toml`/`.env.example` 스캐폴드 + KIS 사전검증 (결과: §2 반영 완료) | — |
 | **PR1** | `kis_client` + `store` + `universe` + `sync` CLI. 2년 백필 + 일일 incremental. | KIS |
 | **PR2** | `indicators` + `stage` + `classify` CLI | — |
 | **PR3** | `template` + `darvas` + `signals` + `supply_demand` 통합 + `signals` CLI. **이 시점부터 일일 사용 가능** | MCP |
@@ -582,6 +598,5 @@ PR3 머지 시점부터 시그널이 의미 있게 동작하나, PR4 백테스�
 
 ## 17. 본 문서가 답하지 않는 것
 
-- 구체적 KIS 엔드포인트 URL/파라미터 / 응답 컬럼명 — PR0/PR1에서 KIS 문서 + 실제 응답 확인 후 픽스
+- 구체적 KIS 엔드포인트 URL/파라미터 / 응답 컬럼명 — PR1에서 실제 응답 받고 매핑 픽스
 - 박스 검증기간 / RS 임계값 / 슬로프 lookback의 **최종값** — PR4 결과 보고 확정
-- 한국 상장폐지 종목 과거 데이터 출처 — PR0 검증 결과에 따라 확정 또는 백테스트 한계로 인정

@@ -12,6 +12,7 @@ dependencies = [
     "python-dotenv>=1.0",
     "pydantic>=2.6",
     "tqdm>=4.66",
+    "pykrx>=1.0.45",   # 종목 마스터 전용 (KIS 미제공). ARCHITECTURE §2 참조.
 ]
 
 [project.optional-dependencies]
