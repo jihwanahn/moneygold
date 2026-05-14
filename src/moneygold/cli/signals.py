@@ -1,0 +1,224 @@
+"""일일 시그널 생성 CLI.
+
+사용:
+    python -m moneygold.cli.signals
+    python -m moneygold.cli.signals --asof 20260514
+    python -m moneygold.cli.signals --limit 50    # 첫 N종목만 (디버그)
+    python -m moneygold.cli.signals --export      # store/signals/{asof}.json 저장
+
+ARCHITECTURE.md §7. 시그널은 사용자 매매 보조용 — 자동 주문 안 함.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import sys
+from dataclasses import asdict
+from datetime import datetime
+from pathlib import Path
+
+import pandas as pd
+from tqdm import tqdm
+
+from .. import indicators as ind
+from .. import signals as sg
+from ..config import load_config
+from ..data import store
+
+
+def _setup_logging(level_name: str) -> None:
+    level = getattr(logging, level_name.upper(), logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+
+def _load_index_close(data_dir: Path, index_code: str) -> pd.Series:
+    p = store.index_path(data_dir, index_code)
+    df = store.read_parquet_safe(p)
+    if df is None or df.empty:
+        raise FileNotFoundError(f"지수 {index_code} 없음: {p}")
+    return df.set_index("date")["close"].astype(float)
+
+
+def _load_portfolio(path: Path) -> dict[str, sg.PositionMeta]:
+    if not path.exists():
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+    except Exception:
+        return {}
+    meta = obj.get("meta", {})
+    out: dict[str, sg.PositionMeta] = {}
+    for tk, m in meta.items():
+        out[tk] = sg.PositionMeta(
+            ticker=tk,
+            entry_date=str(m.get("entry_date", "")),
+            entry_price=float(m.get("entry_price", 0.0)),
+            current_stop=float(m.get("current_stop", 0.0)),
+            current_box_top=m.get("current_box", {}).get("top"),
+            current_box_bottom=m.get("current_box", {}).get("bottom"),
+            highest_close_since_entry=m.get("highest_close_since_entry"),
+        )
+    return out
+
+
+def _build_ticker_data(
+    master: pd.DataFrame,
+    data_dir: Path,
+    asof: str,
+    log: logging.Logger,
+) -> list[sg.TickerData]:
+    """마스터의 종목별로 bars + mcap을 읽어와 TickerData 리스트 생성."""
+    out: list[sg.TickerData] = []
+    for row in master.itertuples(index=False):
+        p = store.bars_path(data_dir, row.ticker)
+        bars = store.read_parquet_safe(p)
+        if bars is None or bars.empty:
+            continue
+        # 시가총액 추정: 마지막 close × 평균 거래량 비율... 정확한 mcap이 없으니
+        # close × volume의 임의 비율로 대용. PR5에서 KIS 계좌 + 종목정보로 정확히.
+        # 현재는 close × value/close = value 자체를 mcap 대용 (정확하지 않음, 게이트 통과용)
+        bars_clip = bars[bars["date"] <= asof]
+        if bars_clip.empty:
+            continue
+        # 시가총액 미보유 → 일단 평균 거래대금 × 임의 배수로 추정 (실제 PR5에서 교체)
+        avg_value = float(bars_clip["value"].tail(20).mean()) if "value" in bars_clip.columns else 0.0
+        mcap_proxy = avg_value * 50   # 매우 거친 대용. 백테스트엔 부적합, 라이브 게이트엔 충분.
+
+        out.append(sg.TickerData(
+            ticker=row.ticker,
+            name=row.name,
+            market=row.market,
+            bars=bars,
+            mcap=mcap_proxy,
+            flagged=False,   # PR3+에서 KIS search-stock-info로 플래그 조회
+        ))
+    return out
+
+
+def _compute_rs_rank_map(
+    tickers: list[sg.TickerData],
+    sma_window_for_min_data: int = 252,
+) -> dict[str, float]:
+    """모든 종목의 rs_momentum 계산 후 시장별 횡단면 백분위."""
+    rows = []
+    for td in tickers:
+        bars = td.bars
+        if bars is None or bars.empty or len(bars) < sma_window_for_min_data + 1:
+            continue
+        close = bars["close"].astype(float)
+        rs_mom = ind.rs_momentum(close)
+        rows.append({"ticker": td.ticker, "market": td.market, "rs_momentum": rs_mom})
+
+    if not rows:
+        return {}
+    df = pd.DataFrame(rows)
+    df["rs_rank"] = float("nan")
+    for market, group in df.groupby("market"):
+        df.loc[group.index, "rs_rank"] = ind.rs_rank(group["rs_momentum"]).values
+    return dict(zip(df["ticker"], df["rs_rank"]))
+
+
+def _print_report(sigs: sg.DailySignals, master: pd.DataFrame) -> None:
+    name_map = dict(zip(master["ticker"], master["name"]))
+    print(f"\n=== 일일 시그널 {sigs.asof} ===")
+    print(f"신규 BUY: {len(sigs.new_buys)}  HOLD: {len(sigs.holds)}  SELL: {len(sigs.sells)}\n")
+
+    if sigs.new_buys:
+        print("[신규 BUY]")
+        cols = ("ticker", "name", "market", "entry", "stop", "risk%", "shares",
+                "box_top", "box_bot", "days", "vol×", "gap", "RS")
+        print("  " + "  ".join(f"{c:>10}" for c in cols))
+        for b in sigs.new_buys:
+            risk_pct = (b.entry_guide - b.stop) / b.entry_guide * 100
+            print("  " + "  ".join([
+                f"{b.ticker:>10}", f"{b.name[:10]:>10}", f"{b.market:>10}",
+                f"{b.entry_guide:>10,.0f}", f"{b.stop:>10,.0f}",
+                f"{risk_pct:>9.1f}%", f"{b.suggested_shares:>10,}",
+                f"{b.box_top:>10,.0f}", f"{b.box_bottom:>10,.0f}",
+                f"{b.days_in_box:>10}", f"{b.volume_ratio:>9.2f}x",
+                f"{'YES' if b.is_gap_breakout else '-':>10}",
+                f"{b.rs_rank:>10.1f}",
+            ]))
+        print()
+
+    if sigs.sells:
+        print("[SELL]")
+        for s in sigs.sells:
+            label = f" ⚠ {s.label}" if s.label else ""
+            print(f"  {s.ticker} {s.name:>10}  {s.reason:>15}  exit~{s.exit_guide:,.0f}{label}")
+        print()
+
+    if sigs.holds:
+        print(f"[HOLD] {len(sigs.holds)}개 (트레일링 갱신 종목만 표시)")
+        updated = [h for h in sigs.holds if h.trail_updated]
+        for h in updated[:20]:
+            print(f"  {h.ticker} {h.name:>10}  close {h.current_close:,.0f}  stop {h.current_stop:,.0f} → {h.new_stop:,.0f}")
+        print()
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="moneygold 일일 시그널")
+    parser.add_argument("--asof", help="기준일 YYYYMMDD. 기본은 오늘.")
+    parser.add_argument("--limit", type=int, help="첫 N개 종목만 (디버그)")
+    parser.add_argument("--export", action="store_true", help="store/signals/{asof}.json 저장")
+    args = parser.parse_args(argv)
+
+    cfg = load_config()
+    _setup_logging(cfg.log_level)
+    log = logging.getLogger("moneygold.cli.signals")
+
+    asof = args.asof or datetime.now().strftime("%Y%m%d")
+    data_dir = Path(cfg.data_dir)
+
+    master = store.read_parquet_safe(store.master_path(data_dir))
+    if master is None or master.empty:
+        log.error("마스터 없음. 먼저 `python -m moneygold.cli.sync --universe`")
+        return 1
+    if args.limit:
+        master = master.head(args.limit).copy()
+
+    try:
+        idx_kospi = _load_index_close(data_dir, "KOSPI200")
+        idx_kosdaq = _load_index_close(data_dir, "KOSDAQ150")
+    except FileNotFoundError as e:
+        log.error(str(e))
+        return 1
+    idx_close_by_market = {"KOSPI": idx_kospi[idx_kospi.index <= asof],
+                            "KOSDAQ": idx_kosdaq[idx_kosdaq.index <= asof]}
+
+    log.info("Loading bars for %d tickers ...", len(master))
+    tickers = _build_ticker_data(master, data_dir, asof, log)
+    log.info("Loaded %d / %d tickers", len(tickers), len(master))
+
+    log.info("Computing RS rank ...")
+    rs_rank_map = _compute_rs_rank_map(tickers)
+    log.info("RS rank computed for %d tickers", len(rs_rank_map))
+
+    portfolio_path = data_dir / "portfolio.json"
+    portfolio = _load_portfolio(portfolio_path)
+    if portfolio:
+        log.info("Portfolio loaded: %d positions", len(portfolio))
+
+    log.info("Generating signals as of %s ...", asof)
+    sigs = sg.generate_signals(asof, tickers, portfolio, rs_rank_map, idx_close_by_market, cfg)
+
+    _print_report(sigs, master)
+
+    if args.export:
+        out_path = data_dir / "signals" / f"{asof}.json"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(sg.to_dict(sigs), f, ensure_ascii=False, indent=2)
+        log.info("Exported: %s", out_path)
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
