@@ -177,7 +177,7 @@ def generate_signals(
         # ---------- 보유 종목: HOLD/SELL ----------
         if td.ticker in portfolio:
             pos = portfolio[td.ticker]
-            sell, hold = _evaluate_position(bars, pos, idx_close_by_market.get(td.market), asof, td)
+            sell, hold = _evaluate_position(bars, pos, asof, td)
             if sell is not None:
                 sells.append(sell)
             elif hold is not None:
@@ -185,21 +185,21 @@ def generate_signals(
             continue
 
         # ---------- 신규 후보: BUY ----------
-        # Stage 2 확인
-        idx_close = idx_close_by_market.get(td.market)
-        if idx_close is None:
-            continue
-        stage_val, stage_since = _compute_stage(bars, idx_close, asof)
+        # Stage 2 확인 (RS는 Stage 판정에 안 들어감)
+        stage_params = _stage_params_from_cfg(s)
+        stage_val, stage_since = _compute_stage(bars, asof, stage_params)
         if stage_val != stg.STAGE_ADVANCING:
             continue
 
-        # Minervini Template
+        # Minervini Template (조건 6/7는 고가/저가 기준)
         rs_rank_value = float(rs_rank_map.get(td.ticker, float("nan")))
         t = tmpl.check_template(
             bars["close"].astype(float),
             rs_rank_value,
             sma200_slope_lookback=s.sma200_slope_lookback,
             rs_rank_min=float(s.rs_rank_min),
+            high_series=bars["high"].astype(float) if "high" in bars.columns else None,
+            low_series=bars["low"].astype(float) if "low" in bars.columns else None,
         )
         if not t.passed:
             continue
@@ -249,53 +249,46 @@ def generate_signals(
 # Helpers
 # ============================================================
 
-def _compute_stage(bars: pd.DataFrame, idx_close: pd.Series, asof: str) -> tuple[int, str | None]:
+def _compute_stage(
+    bars: pd.DataFrame, asof: str,
+    stage_params: stg.StageParams | None = None,
+) -> tuple[int, str | None]:
     """오늘의 Stage + Stage 2 진입일(있으면).
 
-    Stage 2가 아닐 때 stage_since=None.
+    Weinstein 분류기는 RS 없이 가격+MA만 사용 (TV 원전 일치).
+    RS는 Minervini Template 조건 8로 별도.
     """
     close = bars["close"].astype(float)
-    sma_30w = ind.sma(close, 150)
-    sma_slope = ind.slope_normalized(sma_30w, 50)
-
-    # RS line은 date 인덱스로 매칭해서 계산 후 positional로 변환
-    close_by_date = close.copy()
-    close_by_date.index = bars["date"].astype(str)
-    rs = ind.rs_line(close_by_date, idx_close)
-    rs_slope_by_date = ind.slope_normalized(rs, 50)
-
-    if sma_30w.empty or rs.empty:
+    if close.empty:
         return stg.STAGE_UNKNOWN, None
 
-    # rs_slope을 positional 인덱스로 변환 (bars["date"] 기준 매핑)
-    rs_slope = pd.Series(
-        rs_slope_by_date.reindex(bars["date"].astype(str).values).values,
-        index=close.index,
-    )
-
-    last_close = float(close.iloc[-1])
-    last_sma = float(sma_30w.iloc[-1]) if pd.notna(sma_30w.iloc[-1]) else float("nan")
-    last_sma_slope = float(sma_slope.iloc[-1]) if pd.notna(sma_slope.iloc[-1]) else float("nan")
-    last_rs_slope = float(rs_slope.iloc[-1]) if pd.notna(rs_slope.iloc[-1]) else float("nan")
-    stage_val = stg.classify_stage(last_close, last_sma, last_sma_slope, last_rs_slope)
+    series = stg.classify_stage_series(close, stage_params)
+    stage_val = int(series.iloc[-1])
 
     stage_since = None
     if stage_val == stg.STAGE_ADVANCING:
-        stage_series = stg.classify_stage_series(close, sma_30w, sma_slope, rs_slope)
-        # 끝에서부터 비-Stage2 만날 때까지 거슬러 올라가 시작일 찾기
         dates = bars["date"].astype(str).values
-        idx = len(stage_series) - 1
-        while idx > 0 and stage_series.iloc[idx - 1] == stg.STAGE_ADVANCING:
+        idx = len(series) - 1
+        while idx > 0 and series.iloc[idx - 1] == stg.STAGE_ADVANCING:
             idx -= 1
         stage_since = str(dates[idx])
 
     return stage_val, stage_since
 
 
+def _stage_params_from_cfg(s) -> stg.StageParams:
+    return stg.StageParams(
+        ma_length=getattr(s, "stage_ma_length", 150),
+        slope_lookback=getattr(s, "stage_slope_lookback", 20),
+        slope_threshold_pct=getattr(s, "stage_slope_threshold_pct", 0.001),
+        band_pct=getattr(s, "stage_band_pct", 0.03),
+        ma_type=getattr(s, "stage_ma_type", "SMA"),
+    )
+
+
 def _evaluate_position(
     bars: pd.DataFrame,
     pos: PositionMeta,
-    idx_close: pd.Series | None,
     asof: str,
     td: TickerData,
 ) -> tuple[SellSignal | None, HoldSignal | None]:
@@ -324,13 +317,12 @@ def _evaluate_position(
         ), None
 
     # 3) Stage 3 / 4 전환
-    if idx_close is not None:
-        stage_val, _ = _compute_stage(bars, idx_close, asof)
-        if stage_val in (stg.STAGE_TOPPING, stg.STAGE_DECLINING):
-            return SellSignal(
-                ticker=td.ticker, name=td.name, market=td.market,
-                reason=f"STAGE_{stage_val}", exit_guide=last_close, asof=asof,
-            ), None
+    stage_val, _ = _compute_stage(bars, asof)
+    if stage_val in (stg.STAGE_TOPPING, stg.STAGE_DECLINING):
+        return SellSignal(
+            ticker=td.ticker, name=td.name, market=td.market,
+            reason=f"STAGE_{stage_val}", exit_guide=last_close, asof=asof,
+        ), None
 
     # HOLD — 트레일링 스톱 갱신 시도
     new_stop = pos.current_stop

@@ -1,29 +1,32 @@
 """Weinstein Stage Analysis 4단계 분류기.
 
-상태 정의:
-  1 = basing / undefined (fall-through)
-  2 = advancing (matter of timing for entry)
-  3 = topping / distribution
-  4 = declining
+ARCHITECTURE.md §4. TradingView 일반 구현 + 책 "Secrets for Profiting in Bull and
+Bear Markets" (Stan Weinstein) 원전과 일치하는 history-dependent 상태머신.
 
-판정 입력:
-  - close              : 현재 종가
-  - sma_30w            : 30주(=일봉 150) SMA
-  - sma_30w_slope      : sma_30w의 50영업일(=10주) 정규화 기울기 (slope_normalized 결과)
-  - rs_line_slope      : RS line(stock/index)의 50영업일 정규화 기울기
+핵심:
+  - MA 30주(=일봉 150) + slope (20봉 변화율 정규화)
+  - Slope threshold (|r| > 0.1%) — 그 이하는 flat
+  - Price band (MA ±3%) — 그 안은 위/아래 미판정
+  - **RS는 stage 판정에 들어가지 않음** (Minervini Template의 조건 8로 별도)
+  - 상태 전이가 *이전 상태*에 의존:
+      Stage 2 (Advance)  → slope > 0 AND close > ma + band
+      Stage 4 (Decline)  → slope < 0 AND close < ma - band
+      Stage 3 (Top)      → flat AND 직전이 Stage 2
+      Stage 1 (Base)     → flat AND 직전이 Stage 1/3/4/초기
 
-ARCHITECTURE.md §4. 강화 신호 (외인/기관 누적)는 PR3에서 BUY 게이트에 추가.
+상태머신이라 단일 시점만 보고는 Stage 1/3 구분 불가. 시계열 1회 통과 후 마지막 값.
 """
 from __future__ import annotations
+
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
 
 from . import indicators as ind
 
-
-# 상태 코드
-STAGE_UNKNOWN = 0     # NaN 등으로 판정 불가
+# 상태 상수
+STAGE_UNKNOWN = 0
 STAGE_BASING = 1
 STAGE_ADVANCING = 2
 STAGE_TOPPING = 3
@@ -38,140 +41,92 @@ STAGE_NAMES = {
 }
 
 
-def classify_stage(
-    close: float,
-    sma_30w: float,
-    sma_30w_slope: float,
-    rs_line_slope: float,
-) -> int:
-    """단일 시점 Stage 라벨. 입력 NaN이 하나라도 있으면 UNKNOWN(0)."""
-    if any(pd.isna(x) for x in (close, sma_30w, sma_30w_slope, rs_line_slope)):
-        return STAGE_UNKNOWN
-
-    above = close > sma_30w
-    ma_up = sma_30w_slope > 0
-    ma_down = sma_30w_slope < 0
-    rs_up = rs_line_slope > 0
-    rs_down = rs_line_slope < 0
-
-    if above and ma_up and rs_up:
-        return STAGE_ADVANCING
-    if above and (not ma_up) and rs_down:
-        return STAGE_TOPPING
-    if (not above) and ma_down and rs_down:
-        return STAGE_DECLINING
-    return STAGE_BASING
+@dataclass(frozen=True)
+class StageParams:
+    """Stage 분류 파라미터. 일봉 기준 디폴트는 TradingView Weinstein과 동일."""
+    ma_length: int = 150           # 30주 = 일봉 150
+    slope_lookback: int = 20       # 20봉 (=4주)
+    slope_threshold_pct: float = 0.001    # 0.1% — flat 판정
+    band_pct: float = 0.03          # MA 근처 ±3%는 위/아래 미판정
+    ma_type: str = "SMA"            # SMA | EMA
 
 
-def classify_stage_series(
-    close: pd.Series,
-    sma_30w: pd.Series,
-    sma_30w_slope: pd.Series,
-    rs_line_slope: pd.Series,
-) -> pd.Series:
-    """시계열 버전. 일자별 Stage 라벨.
+def classify_stage_series(close: pd.Series, params: StageParams | None = None) -> pd.Series:
+    """시계열 Stage 분류. History-dependent 상태머신.
 
-    모든 입력 시리즈는 같은 인덱스. 출력은 같은 인덱스의 int8 Series.
+    Returns
+    -------
+    pd.Series  index=close.index, dtype=int8. 값 0(UNKNOWN)/1/2/3/4.
     """
-    df = pd.concat(
-        [
-            close.rename("close"),
-            sma_30w.rename("sma"),
-            sma_30w_slope.rename("ma_slope"),
-            rs_line_slope.rename("rs_slope"),
-        ],
-        axis=1,
-    )
+    p = params or StageParams()
+    if p.ma_type == "EMA":
+        ma = ind.ema(close, p.ma_length)
+    else:
+        ma = ind.sma(close, p.ma_length)
 
-    out = pd.Series(STAGE_UNKNOWN, index=df.index, dtype="int8")
-    has_all = df.notna().all(axis=1)
+    ma_prev = ma.shift(p.slope_lookback)
+    r = (ma - ma_prev) / ma                     # 정규화 변화율
+    above = close > ma * (1.0 + p.band_pct)
+    below = close < ma * (1.0 - p.band_pct)
+    abs_r_flat = r.abs() <= p.slope_threshold_pct
 
-    above = df["close"] > df["sma"]
-    ma_up = df["ma_slope"] > 0
-    ma_down = df["ma_slope"] < 0
-    rs_up = df["rs_slope"] > 0
-    rs_down = df["rs_slope"] < 0
+    n = len(close)
+    stages = np.zeros(n, dtype=np.int8)         # 0 = UNKNOWN
+    prev = STAGE_BASING
 
-    is_advancing = has_all & above & ma_up & rs_up
-    is_topping = has_all & above & (~ma_up) & rs_down
-    is_declining = has_all & (~above) & ma_down & rs_down
+    for i in range(n):
+        if pd.isna(ma.iloc[i]) or pd.isna(ma_prev.iloc[i]):
+            stages[i] = STAGE_UNKNOWN
+            continue
 
-    # default for has_all but no other branch = BASING
-    out.loc[has_all] = STAGE_BASING
-    out.loc[is_advancing] = STAGE_ADVANCING
-    out.loc[is_topping] = STAGE_TOPPING
-    out.loc[is_declining] = STAGE_DECLINING
-    return out
+        r_i = float(r.iloc[i])
+        above_i = bool(above.iloc[i])
+        below_i = bool(below.iloc[i])
+        flat_i = bool(abs_r_flat.iloc[i])
+
+        if (r_i > p.slope_threshold_pct) and above_i:
+            st = STAGE_ADVANCING
+        elif (r_i < -p.slope_threshold_pct) and below_i:
+            st = STAGE_DECLINING
+        elif flat_i:
+            # Stage 2 → flat → Stage 3 → flat 지속 → Stage 3 유지
+            # Stage 4 → flat → Stage 1 → flat 지속 → Stage 1 유지
+            if prev in (STAGE_ADVANCING, STAGE_TOPPING):
+                st = STAGE_TOPPING
+            else:
+                st = STAGE_BASING
+        else:
+            # 추세는 있으나 가격이 band 안 — 직전 상태 유지
+            st = prev
+
+        stages[i] = st
+        prev = st
+
+    return pd.Series(stages, index=close.index, dtype="int8")
 
 
-def stage_since(stage_series: pd.Series, target: int = STAGE_ADVANCING) -> pd.Timestamp | None:
-    """가장 최근의 *연속* target Stage 구간이 언제 시작됐는지.
+def classify_stage(close: pd.Series, params: StageParams | None = None) -> int:
+    """단일 시점 Stage = 시계열의 마지막 값.
 
-    Stage 2가 BUY 게이트라 "Stage 2 진입 이후 며칠 됐나"를 시그널에 첨부할 때 사용.
+    상태머신이라 history가 필요하므로 시계열 전체를 1회 계산.
+    빈 시리즈이거나 워밍업 미완료면 UNKNOWN.
+    """
+    if close.empty:
+        return STAGE_UNKNOWN
+    series = classify_stage_series(close, params)
+    if series.empty:
+        return STAGE_UNKNOWN
+    return int(series.iloc[-1])
+
+
+def stage_since(stage_series: pd.Series, target: int = STAGE_ADVANCING) -> str | None:
+    """가장 최근의 *연속* target Stage 구간이 언제 시작됐는지 (index 값 반환).
+
     target Stage가 마지막 시점에 활성이 아니면 None.
     """
     if stage_series.empty or stage_series.iloc[-1] != target:
         return None
-    # 끝에서부터 거꾸로 같은 stage가 유지되는 첫 시점
-    for ts, v in zip(stage_series.index[::-1], stage_series.values[::-1]):
-        if v != target:
-            # 직전까지가 target이 유지된 마지막. 한 칸 앞으로.
-            break
-        last_match = ts
-    return last_match
-
-
-# ============================================================
-# Convenience: bars + index DataFrame → Stage series
-# ============================================================
-
-def compute_stage_for_ticker(
-    bars: pd.DataFrame,
-    index_close: pd.Series,
-    *,
-    sma_window: int = 150,
-    slope_lookback: int = 50,
-) -> pd.DataFrame:
-    """한 종목의 bars + 지수 close → Stage + 주요 지표 부착된 DataFrame.
-
-    Parameters
-    ----------
-    bars : DataFrame  columns ['date', 'close', ...], date는 정렬된 YYYYMMDD 문자열
-    index_close : Series  index=date(YYYYMMDD str), values=지수 종가
-    sma_window : 30주(=150 일봉) SMA 윈도우
-    slope_lookback : 50영업일 정규화 기울기 lookback
-
-    Returns
-    -------
-    DataFrame copy of `bars` plus columns:
-      sma_30w, sma_30w_slope, rs_line, rs_line_slope, stage
-    """
-    if bars.empty:
-        return bars.copy()
-
-    work = bars.copy()
-    work = work.sort_values("date").reset_index(drop=True)
-
-    close = work["close"].astype(float)
-    work["sma_30w"] = ind.sma(close, sma_window)
-    work["sma_30w_slope"] = ind.slope_normalized(work["sma_30w"], slope_lookback)
-
-    # RS line: 날짜 인덱스 정렬 후 계산
-    s_by_date = close.copy()
-    s_by_date.index = work["date"]
-    rs = ind.rs_line(s_by_date, index_close)
-    rs_slope = ind.slope_normalized(rs, slope_lookback)
-
-    # 다시 정수 인덱스로 매핑
-    rs_aligned = rs.reindex(work["date"]).reset_index(drop=True)
-    rs_slope_aligned = rs_slope.reindex(work["date"]).reset_index(drop=True)
-    work["rs_line"] = rs_aligned
-    work["rs_line_slope"] = rs_slope_aligned
-
-    work["stage"] = classify_stage_series(
-        work["close"].astype(float),
-        work["sma_30w"],
-        work["sma_30w_slope"],
-        work["rs_line_slope"],
-    )
-    return work
+    idx = len(stage_series) - 1
+    while idx > 0 and stage_series.iloc[idx - 1] == target:
+        idx -= 1
+    return str(stage_series.index[idx])

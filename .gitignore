@@ -4,6 +4,9 @@
 *.pem
 *.key
 
+# Reference PDFs (저작권)
+*.pdf
+
 # Data & caches
 store/
 result/

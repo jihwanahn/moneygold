@@ -29,7 +29,9 @@ def _make_cfg(
         strategy=StrategyParams(
             stage2_require_inst_flow=False,
             rs_rank_min=rs_rank_min,
-            sma200_slope_lookback=100,
+            sma200_slope_lookback=22,
+            stage_ma_length=150, stage_ma_type="SMA",
+            stage_slope_lookback=20, stage_slope_threshold_pct=0.001, stage_band_pct=0.03,
             box_high_lookback=20, box_high_confirm=3,
             box_height_max_pct=12.0, box_valid_min_days=15, box_stale_days=60,
             breakout_buffer=0.003, breakout_volume_mult=1.5,

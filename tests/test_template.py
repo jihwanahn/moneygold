@@ -67,18 +67,27 @@ def test_condition_1_close_above_sma150_and_sma200():
     assert r.checks[0] is False
 
 
-def test_condition_6_low_recovery_30pct():
-    """52주 저점 대비 +30% 미만이면 조건 6 fail.
+def test_condition_6_low_recovery_default_25pct():
+    """디폴트 25% 임계: 저점 대비 25% 미만 회복이면 조건 6 fail.
 
-    저점이 80, 현재 100이면 +25% → fail.
+    저점 80, 현재 99이면 +23.75% → fail.
     """
+    n = 320
+    arr = [100.0] * 100 + list(np.linspace(100, 80, 100)) + list(np.linspace(80, 99, 120))
+    arr = arr[:n]
+    close = pd.Series(arr)
+    r = template.check_template(close, rs_rank_value=85.0)
+    assert r.checks[5] is False
+
+
+def test_condition_6_low_recovery_passes_at_threshold():
+    """저점 80, 현재 100이면 +25% → 디폴트 임계에 정확히 도달, 통과."""
     n = 320
     arr = [100.0] * 100 + list(np.linspace(100, 80, 100)) + list(np.linspace(80, 100, 120))
     arr = arr[:n]
     close = pd.Series(arr)
     r = template.check_template(close, rs_rank_value=85.0)
-    # low_52w ≈ 80, close ≈ 100 -> 25% 회복. 30% 미만이라 fail.
-    assert r.checks[5] is False
+    assert r.checks[5] is True
 
 
 def test_condition_7_within_25pct_of_high():

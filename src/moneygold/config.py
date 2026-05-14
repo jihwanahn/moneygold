@@ -60,6 +60,13 @@ class StrategyParams:
     stage2_require_inst_flow: bool
     rs_rank_min: int
     sma200_slope_lookback: int
+    # Weinstein Stage 파라미터 (TradingView 원전 일치)
+    stage_ma_length: int             # 30주 = 일봉 150
+    stage_ma_type: str               # SMA | EMA
+    stage_slope_lookback: int        # 20봉
+    stage_slope_threshold_pct: float # 0.1%
+    stage_band_pct: float            # MA ±3%
+    # Darvas
     box_high_lookback: int
     box_high_confirm: int
     box_height_max_pct: float
@@ -115,7 +122,12 @@ def load_config() -> AppConfig:
         strategy=StrategyParams(
             stage2_require_inst_flow=_bool("STAGE2_REQUIRE_INST_FLOW", True),
             rs_rank_min=_int("RS_RANK_MIN", 70),
-            sma200_slope_lookback=_int("SMA200_SLOPE_LOOKBACK", 100),
+            sma200_slope_lookback=_int("SMA200_SLOPE_LOOKBACK", 22),
+            stage_ma_length=_int("STAGE_MA_LENGTH", 150),
+            stage_ma_type=_str("STAGE_MA_TYPE", "SMA"),
+            stage_slope_lookback=_int("STAGE_SLOPE_LOOKBACK", 20),
+            stage_slope_threshold_pct=_float("STAGE_SLOPE_THRESHOLD_PCT", 0.001),
+            stage_band_pct=_float("STAGE_BAND_PCT", 0.03),
             box_high_lookback=_int("BOX_HIGH_LOOKBACK", 20),
             box_high_confirm=_int("BOX_HIGH_CONFIRM", 3),
             box_height_max_pct=_float("BOX_HEIGHT_MAX_PCT", 12.0),

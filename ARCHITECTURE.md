@@ -142,73 +142,92 @@ store/
 
 ## 4. Weinstein Stage Classifier (`stage.py`)
 
-종목당 매 영업일 1, 2, 3, 4 중 하나 라벨링.
+TradingView 일반 구현 일치 + 책 *"Secrets for Profiting in Bull and Bear Markets"* 원전. **History-dependent 상태머신** — 이전 상태가 현재 라벨에 영향.
+
+**RS는 Stage 판정에 사용하지 않음** — 책 원전엔 가격+MA만 사용. RS는 Minervini Template 조건 8로 별도 게이트.
 
 ```
-def classify_stage(close, sma_30w, sma_30w_slope, rs_line_slope) -> int:
-    above = close > sma_30w
-    ma_up, ma_down = sma_30w_slope > 0, sma_30w_slope < 0
-    rs_up, rs_down = rs_line_slope > 0, rs_line_slope < 0
+파라미터 (일봉 기본):
+  ma_length              = 150   # 30주
+  slope_lookback         = 20    # 4주
+  slope_threshold_pct    = 0.001 # 0.1%
+  band_pct               = 0.03  # MA ±3%
+  ma_type                = "SMA" # EMA도 옵션
 
-    if above and ma_up and rs_up:        return 2  # advancing
-    if above and not ma_up and rs_down:  return 3  # topping/distribution
-    if not above and ma_down and rs_down: return 4  # declining
-    return 1                                         # basing / undefined
+상태 전이:
+  r = (ma - ma[20]) / ma
+  above = close > ma * (1 + band)
+  below = close < ma * (1 - band)
+  flat  = |r| <= threshold
+
+  if (r > threshold) AND above:    Stage 2
+  elif (r < -threshold) AND below: Stage 4
+  elif flat:
+      if prev in (2, 3):           Stage 3   # 추세 후 평탄 = 분배
+      else:                        Stage 1   # 그 외 평탄 = 베이스
+  else:                            prev       # 직전 상태 유지 (band 안 + 추세)
 ```
 
-- 기울기 판정 lookback: **10주(=50영업일)**. 부호만 보고 강도 임계값은 안 둠.
-- Stage 1은 fall-through (Stage 2/3/4 외 모든 경우). 게이트 용도엔 충분하지만 분포 통계 해석 시 주의.
-- 거래량은 Stage 분류 자체엔 미사용 — 거래량 확인은 Darvas 돌파 단계에서.
+- 매 영업일 1/2/3/4 중 하나 라벨링. 워밍업(MA 미완성) 구간은 0(UNKNOWN).
+- Stage 3는 *Stage 2 → flat*에서만 발생. Stage 4 → flat은 Stage 1.
+- 거래량은 Stage 분류 미사용 — 거래량 확인은 Darvas 돌파 단계에서.
 
 **강화 신호 (BUY 게이트 추가):**
 - 최근 5/20일 외인+기관 누적 순매수가 우상향 (양수 + slope > 0)
-- `STAGE2_REQUIRE_INST_FLOW=true` (기본) 일 때 이 조건 미충족이면 "약한 Stage 2"로 라벨링하고 BUY는 차단
+- `STAGE2_REQUIRE_INST_FLOW=true` (기본) 일 때 이 조건 미충족이면 BUY는 차단
 
 ## 5. Minervini Trend Template (`template.py`)
 
+TradingView 일반 구현 + Mark Minervini *"Trade Like a Stock Market Wizard"* 원전.
 8조건 모두 통과해야 BUY 후보.
 
 | # | 조건 | 디폴트 임계 |
 | --- | --- | --- |
-| 1 | `close > sma150 and close > sma200` | — |
+| 1 | `close > sma150 AND close > sma200` | — |
 | 2 | `sma150 > sma200` | — |
-| 3 | `sma200` 우상향 | **slope_100d > 0** (원전 "최소 5개월") |
-| 4 | `sma50 > sma150 > sma200` | — |
+| 3 | `sma200 > sma200[22]` | **22봉 우상향** (TV 일반, 책 "최소 1개월") |
+| 4 | `sma50 > sma150 AND sma50 > sma200` | — |
 | 5 | `close > sma50` | — |
-| 6 | `close >= low_52w * 1.30` | 30% 회복 |
-| 7 | `close >= high_52w * 0.75` | 고점 25% 이내 |
-| 8 | `rs_rank >= 70` | 시장 횡단면 백분위 |
+| 6 | `close >= lowest(low, 260) × 1.25` | **저가** 기준, 25% 회복 |
+| 7 | `close >= highest(high, 260) × 0.75` | **고가** 기준, 25% 이내 |
+| 8 | `rs_rank >= 70` | IBD 4Q 가중 모멘텀의 시장 횡단면 백분위 |
+
+조건 6/7은 **고가/저가 기준** (종가 아님). 한국시장 ±30% 가격제한과 무관하게 원전 정의 충실.
 
 선택 9번 (Minervini growth, `FUNDAMENTAL_REQUIRED=true` 일 때만): 분기 EPS YoY ≥ 25% **또는** 직전 2분기 EPS 가속 (`Q-1 yoy > Q-2 yoy`). 같은 기준으로 매출. MCP `get_financial_data` 결과로 판정. 펀더멘털 미공시 종목은 건너뜀. **기본 false** — Weinstein·Darvas만으로 시작.
 
 ## 6. Darvas Box (`darvas.py`)
 
-박스 탐지가 이 시스템에서 가장 손이 많이 가는 부분.
+Nicolas Darvas *"How I Made $2,000,000 in the Stock Market"* CH4 원전 충실.
+원전 정의: "stocks moved in a series of frames... oscillate between a low and a high point... 10% to 20% each way." 원전엔 **시간 임계나 거래량 임계가 없음** — PR4 sweep으로 우리만의 추가였던 거래량 1.5×·검증 15일·확정 3일 튜닝 (G3 채택).
 
 ### 박스 가격 기준
 
-- **천장 = `rolling_high(high, BOX_HIGH_LOOKBACK)` 의 고가** (Darvas 원전)
+- **천장 = `rolling_high(high, BOX_HIGH_LOOKBACK)` 의 고가**
 - **바닥 = 천장 확정 후 도달한 `low`의 최저값**
 - **돌파 판정 = `close`** (장중 일시 돌파 무시, 종가 확정)
 
-### 박스 상태머신
+### 박스 상태머신 (PR4 sweep G3 디폴트)
 
 ```
 SEARCHING        # 천장 후보 탐색 중
-  → (천장 후보 BOX_HIGH_CONFIRM=3일 동안 깨지지 않음) → TOP_CONFIRMED
-TOP_CONFIRMED    # 천장은 확정, 바닥 형성 대기
+  → (천장 후보 BOX_HIGH_CONFIRM=1일 동안 깨지지 않음) → TOP_CONFIRMED
+TOP_CONFIRMED    # 천장 확정, 바닥 형성 대기
   → (저점이 천장-12% 안에 머묾) → FORMING
   → (저점이 천장-12% 초과 하락) → SEARCHING (박스 무효)
 FORMING          # 박스 안에서 횡보 중
-  → (BOX_VALID_MIN_DAYS=15일 누적) → CONFIRMED
-  → (저점이 박스 바닥 미만) → BROKEN_DOWN → SEARCHING (cooldown 0)
+  → (BOX_VALID_MIN_DAYS=5일 누적) → CONFIRMED
+  → (저점이 박스 바닥 미만) → BROKEN_DOWN → SEARCHING
 CONFIRMED        # 정식 박스, 돌파 대기
-  → (close > top * (1 + BREAKOUT_BUFFER) and volume_ratio_50 >= BREAKOUT_VOLUME_MULT) → BREAKOUT_TODAY
+  → (close > top × (1 + BREAKOUT_BUFFER=0.003) and volume_ratio_50 >= BREAKOUT_VOLUME_MULT=1.0)
+       → BREAKOUT_TODAY
   → (close < bottom) → BROKEN_DOWN → SEARCHING
   → (BOX_STALE_DAYS=60일 경과) → STALE → SEARCHING
 BREAKOUT_TODAY   # 돌파 당일 — BUY 시그널 트리거
   → 다음 영업일부터 새 박스 탐색 시작 (포지션 보유 중이면 트레일링 박스로 전환)
 ```
+
+PR4 백테스트 결과(2025-11~2026-05, 전체 종목): G3 trades 9건 / Total +55.3% / Alpha -52.3%p (베이스 디폴트 trades 6건 / Total +39.4% / Alpha -68.1%p 대비 개선).
 
 ### 트레일링 박스
 
@@ -535,14 +554,23 @@ MCAP_MIN_KRW=50000000000
 # 전략 파라미터 (백테스트 후 확정)
 STAGE2_REQUIRE_INST_FLOW=true
 RS_RANK_MIN=70
-SMA200_SLOPE_LOOKBACK=100
+SMA200_SLOPE_LOOKBACK=22
+
+# Weinstein Stage (PR4: RS 제거 + history-dependent + TV 일치)
+STAGE_MA_LENGTH=150
+STAGE_MA_TYPE=SMA
+STAGE_SLOPE_LOOKBACK=20
+STAGE_SLOPE_THRESHOLD_PCT=0.001
+STAGE_BAND_PCT=0.03
+
+# Darvas (PR4 sweep G3, 원전 충실)
 BOX_HIGH_LOOKBACK=20
-BOX_HIGH_CONFIRM=3
+BOX_HIGH_CONFIRM=1
 BOX_HEIGHT_MAX_PCT=12
-BOX_VALID_MIN_DAYS=15
+BOX_VALID_MIN_DAYS=5
 BOX_STALE_DAYS=60
 BREAKOUT_BUFFER=0.003
-BREAKOUT_VOLUME_MULT=1.5
+BREAKOUT_VOLUME_MULT=1.0
 GAP_BUY_ON_PULLBACK=true
 FUNDAMENTAL_REQUIRED=false
 
