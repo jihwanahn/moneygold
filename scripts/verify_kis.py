@@ -175,16 +175,20 @@ def test_delisted(token, cfg) -> None:
     print("Test 3: 상장폐지 종목 과거 일봉 데이터 제공 여부")
     print("=" * 70)
 
-    # 주의: 폐지 종목 코드는 시간에 따라 신규 발행/재사용될 수 있음.
-    # 아래는 검증 시점에 폐지 확실시되는 종목 후보 — 응답을 보고 판단.
+    # 데이터가 와도 *날짜 범위*를 봐야 진짜 폐지 종목인지 재발행 코드인지 판별 가능.
+    # 매우 오래 전(5년+) 기간을 요청하고 가장 최근/오래된 응답일자를 출력한다.
     candidates = [
-        ("011000", "㈜진로 (구)"),         # 합병/소멸 이력 종목 예시
-        ("003540", "대신증권우 (구코드)"),  # 우선주 폐지/이관 후보
-        ("037160", "엔글로벌"),             # 폐지 사례
+        ("011000", "㈜진로 (구) - 합병 소멸 추정"),
+        ("003540", "대신증권우 - 코드 변경 추정"),
+        ("037160", "엔글로벌 - 폐지 사례"),
+        ("066570", "LG전자 (대조군 - 현재 상장중)"),
     ]
 
     end = datetime.now().strftime("%Y%m%d")
-    start = (datetime.now() - timedelta(days=365 * 3)).strftime("%Y%m%d")
+    start = (datetime.now() - timedelta(days=365 * 8)).strftime("%Y%m%d")
+    today_int = int(end)
+
+    print(f"요청 기간: {start} ~ {end} (약 8년, 폐지 시점 포착 목적)\n")
 
     for tk, label in candidates:
         time.sleep(0.3)
@@ -194,17 +198,38 @@ def test_delisted(token, cfg) -> None:
             print(f"  [{tk} {label}] 호출 실패: {e}")
             continue
         rt_cd = data.get("rt_cd")
-        msg = data.get("msg1", "")
-        n = len(data.get("output2", []) or [])
-        verdict = "✅ 데이터 있음" if n > 0 else "❌ 없음"
-        print(f"  [{tk} {label}] rt_cd={rt_cd} rows={n} msg={msg!r}  → {verdict}")
+        rows = data.get("output2", []) or []
+        n = len(rows)
+        if n == 0:
+            print(f"  [{tk}] {label}")
+            print(f"     rows=0  → ❌ 데이터 없음")
+            continue
+
+        # output2는 최신 → 과거 순. 첫 항목이 가장 최근.
+        newest = rows[0].get("stck_bsop_date", "?")
+        oldest = rows[-1].get("stck_bsop_date", "?")
+
+        # 가장 최근 날짜와 오늘 사이 일수 차이
+        try:
+            days_since_last = today_int - int(newest)
+            # 단순 정수 차이 (월말 경계는 무시) — 큰 추세만 보면 됨
+            if days_since_last < 30:
+                verdict = "🔄 재발행/현재 상장 (최근 거래 있음)"
+            elif days_since_last < 365:
+                verdict = "⚠️ 최근 폐지 또는 거래 정지"
+            else:
+                verdict = "✅ 폐지 종목 데이터 (과거 거래만 존재)"
+        except ValueError:
+            verdict = "? 날짜 파싱 실패"
+
+        print(f"  [{tk}] {label}")
+        print(f"     rows={n}  최신={newest}  최오래={oldest}  → {verdict}")
 
     print()
     print("결론 가이드:")
-    print("  - 모든 후보가 rows=0 / 에러: KIS는 폐지 종목 시세 미제공.")
-    print("    백테스트 생존편향 발생 — 별도 데이터셋(KRX 폐지목록 등) 필요 또는")
-    print("    백테스트 결과에 '낙관적 편향' 경고를 명시해야 함.")
-    print("  - 일부 종목 rows>0: 부분 제공. PR4에서 가능한 종목만이라도 포함 검토.")
+    print("  - '✅ 폐지 종목 데이터': KIS가 폐지 종목 과거 시세 *제공*. 백테스트 생존편향 해결 가능.")
+    print("  - '🔄 재발행': 종목코드가 다른 회사에 재할당됨. 폐지 데이터 아님.")
+    print("  - 모든 폐지 후보가 ❌/🔄 면 KIS는 폐지 데이터 미제공 — 별도 데이터셋 필요.")
 
 
 # ============================================================
