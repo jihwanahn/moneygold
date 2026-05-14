@@ -124,41 +124,58 @@ def _compute_rs_rank_map(
     return dict(zip(df["ticker"], df["rs_rank"]))
 
 
-def _print_report(sigs: sg.DailySignals, master: pd.DataFrame) -> None:
+def _print_report(sigs: sg.DailySignals, master: pd.DataFrame, watchlist_top: int = 30) -> None:
     name_map = dict(zip(master["ticker"], master["name"]))
-    print(f"\n=== 일일 시그널 {sigs.asof} ===")
-    print(f"신규 BUY: {len(sigs.new_buys)}  HOLD: {len(sigs.holds)}  SELL: {len(sigs.sells)}\n")
+    print(f"\n=== 일일 추천 {sigs.asof} ===")
+    print(
+        f"후보 풀: {len(sigs.watchlist)}  |  박스 돌파: {len(sigs.new_buys)}  "
+        f"|  보유 HOLD: {len(sigs.holds)}  |  SELL 경고: {len(sigs.sells)}\n"
+    )
 
+    # 1) 박스 돌파 종목 — 즉시 검토 대상
     if sigs.new_buys:
-        print("[신규 BUY]")
-        cols = ("ticker", "name", "market", "entry", "stop", "risk%", "shares",
-                "box_top", "box_bot", "days", "vol×", "gap", "RS")
-        print("  " + "  ".join(f"{c:>10}" for c in cols))
+        print("⭐ [박스 돌파 — 즉시 검토]")
+        print(f"  {'ticker':>7} {'name':>12} {'mkt':>6} {'RS':>5} {'close':>10} {'entry guide':>12} {'stop':>10} {'box days':>9} {'vol×':>7} {'gap':>5}")
         for b in sigs.new_buys:
-            risk_pct = (b.entry_guide - b.stop) / b.entry_guide * 100
-            print("  " + "  ".join([
-                f"{b.ticker:>10}", f"{b.name[:10]:>10}", f"{b.market:>10}",
-                f"{b.entry_guide:>10,.0f}", f"{b.stop:>10,.0f}",
-                f"{risk_pct:>9.1f}%", f"{b.suggested_shares:>10,}",
-                f"{b.box_top:>10,.0f}", f"{b.box_bottom:>10,.0f}",
-                f"{b.days_in_box:>10}", f"{b.volume_ratio:>9.2f}x",
-                f"{'YES' if b.is_gap_breakout else '-':>10}",
-                f"{b.rs_rank:>10.1f}",
-            ]))
+            print(f"  {b.ticker:>7} {b.name[:12]:>12} {b.market:>6} {b.rs_rank:>5.0f} "
+                  f"{b.box_top:>10,.0f} {b.entry_guide:>12,.0f} {b.stop:>10,.0f} "
+                  f"{b.days_in_box:>9} {b.volume_ratio:>6.2f}x {('YES' if b.is_gap_breakout else '-'):>5}")
         print()
 
-    if sigs.sells:
-        print("[SELL]")
-        for s in sigs.sells:
-            label = f" ⚠ {s.label}" if s.label else ""
-            print(f"  {s.ticker} {s.name:>10}  {s.reason:>15}  exit~{s.exit_guide:,.0f}{label}")
+    # 2) 워치리스트 — Stage 2 + Template 통과, RS 상위 TOP N
+    if sigs.watchlist:
+        shown = sigs.watchlist[:watchlist_top]
+        print(f"[BUY 후보 풀 — Stage 2 + Template 통과, RS desc TOP {len(shown)}/{len(sigs.watchlist)}]")
+        print(f"  {'ticker':>7} {'name':>12} {'mkt':>6} {'RS':>5} {'close':>10} {'box':>12} "
+              f"{'box top':>10} {'box bot':>10} {'days':>5} {'stop hint':>10}")
+        for w in shown:
+            box_top_str = f"{w.box_top:,.0f}" if w.box_top is not None else "-"
+            box_bot_str = f"{w.box_bottom:,.0f}" if w.box_bottom is not None else "-"
+            marker = "⭐" if w.box_state.startswith("BREAKOUT") else (
+                "•" if w.box_state == "CONFIRMED" else " "
+            )
+            print(f"  {w.ticker:>7} {w.name[:12]:>12} {w.market:>6} {w.rs_rank:>5.0f} "
+                  f"{w.close:>10,.0f} {marker} {w.box_state[:10]:>10} "
+                  f"{box_top_str:>10} {box_bot_str:>10} {w.days_in_box:>5} {w.suggested_stop:>10,.0f}")
         print()
 
+    # 3) 보유 — Stage 변화 + trailing 갱신
     if sigs.holds:
-        print(f"[HOLD] {len(sigs.holds)}개 (트레일링 갱신 종목만 표시)")
+        print(f"[HOLD] {len(sigs.holds)}개")
         updated = [h for h in sigs.holds if h.trail_updated]
         for h in updated[:20]:
-            print(f"  {h.ticker} {h.name:>10}  close {h.current_close:,.0f}  stop {h.current_stop:,.0f} → {h.new_stop:,.0f}")
+            print(f"  {h.ticker} {h.name:>10}  close {h.current_close:,.0f}  "
+                  f"stop {h.current_stop:,.0f} → {h.new_stop:,.0f}  (trail ↑)")
+        if not updated:
+            print("  (트레일링 갱신 없음)")
+        print()
+
+    # 4) SELL 경고
+    if sigs.sells:
+        print("⚠ [SELL 경고 — 검토 필요]")
+        for s in sigs.sells:
+            label = f"  {s.label}" if s.label else ""
+            print(f"  {s.ticker} {s.name:>10}  {s.reason:>15}  종가 {s.exit_guide:,.0f}{label}")
         print()
 
 
@@ -166,6 +183,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="moneygold 일일 시그널")
     parser.add_argument("--asof", help="기준일 YYYYMMDD. 기본은 오늘.")
     parser.add_argument("--limit", type=int, help="첫 N개 종목만 (디버그)")
+    parser.add_argument("--top", type=int, default=30, help="워치리스트 출력 상위 N (기본 30)")
     parser.add_argument("--export", action="store_true", help="store/signals/{asof}.json 저장")
     args = parser.parse_args(argv)
 
@@ -208,7 +226,7 @@ def main(argv: list[str] | None = None) -> int:
     log.info("Generating signals as of %s ...", asof)
     sigs = sg.generate_signals(asof, tickers, portfolio, rs_rank_map, idx_close_by_market, cfg)
 
-    _print_report(sigs, master)
+    _print_report(sigs, master, watchlist_top=args.top)
 
     if args.export:
         out_path = data_dir / "signals" / f"{asof}.json"

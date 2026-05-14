@@ -76,6 +76,8 @@ class StrategyParams:
     breakout_volume_mult: float
     gap_buy_on_pullback: bool
     fundamental_required: bool
+    skip_darvas: bool = False
+    no_darvas_stop_pct: float = 7.0   # Darvas 미사용 시 stop = entry × (1 - this/100)
 
 
 @dataclass(frozen=True)
@@ -137,6 +139,8 @@ def load_config() -> AppConfig:
             breakout_volume_mult=_float("BREAKOUT_VOLUME_MULT", 1.5),
             gap_buy_on_pullback=_bool("GAP_BUY_ON_PULLBACK", True),
             fundamental_required=_bool("FUNDAMENTAL_REQUIRED", False),
+            skip_darvas=_bool("SKIP_DARVAS", False),
+            no_darvas_stop_pct=_float("NO_DARVAS_STOP_PCT", 7.0),
         ),
         notify=NotifyConfig(
             channels=tuple(c.strip() for c in _str("NOTIFY_CHANNEL", "console").split(",") if c.strip()),

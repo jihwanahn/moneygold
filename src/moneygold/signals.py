@@ -103,11 +103,28 @@ class HoldSignal:
 
 
 @dataclass
+class WatchlistEntry:
+    """Stage 2 + Template 통과 종목 (Darvas 무관). 사용자 매수 검토용 후보 풀."""
+    ticker: str
+    name: str
+    market: str
+    close: float
+    rs_rank: float
+    box_state: str           # SEARCHING / FORMING / CONFIRMED / BREAKOUT_TODAY / BREAKOUT_GAP
+    box_top: float | None
+    box_bottom: float | None
+    days_in_box: int
+    suggested_stop: float    # box_bottom 있으면 그것, 없으면 close × 0.93
+    asof: str = ""
+
+
+@dataclass
 class DailySignals:
     asof: str
-    new_buys: list[BuySignal]
+    new_buys: list[BuySignal]          # Darvas 돌파 종목 (즉시 검토 대상)
     holds: list[HoldSignal]
     sells: list[SellSignal]
+    watchlist: list["WatchlistEntry"] = field(default_factory=list)   # 전체 후보 풀
 
 
 # ============================================================
@@ -140,6 +157,7 @@ def generate_signals(
     new_buys: list[BuySignal] = []
     holds: list[HoldSignal] = []
     sells: list[SellSignal] = []
+    watchlist: list[WatchlistEntry] = []
 
     box_params = darvas.BoxParams(
         box_high_lookback=s.box_high_lookback,
@@ -204,33 +222,60 @@ def generate_signals(
         if not t.passed:
             continue
 
-        # Darvas 박스 — 오늘 BREAKOUT_TODAY 또는 BREAKOUT_GAP
-        box = darvas.current_box(bars, box_params)
-        if not box.is_breakout or box.top is None or box.bottom is None:
-            continue
+        # 여기까지 통과 = Stage 2 + Template 8/8. Darvas 무관하게 워치리스트 후보.
+        box_for_watch = darvas.current_box(bars, box_params)
+        last_close = float(bars["close"].iloc[-1])
+        suggested_stop = float(box_for_watch.bottom) if box_for_watch.bottom is not None else last_close * 0.93
+        watchlist.append(WatchlistEntry(
+            ticker=td.ticker, name=td.name, market=td.market,
+            close=last_close, rs_rank=rs_rank_value,
+            box_state=str(box_for_watch.state),
+            box_top=float(box_for_watch.top) if box_for_watch.top is not None else None,
+            box_bottom=float(box_for_watch.bottom) if box_for_watch.bottom is not None else None,
+            days_in_box=int(box_for_watch.days_in_box),
+            suggested_stop=suggested_stop,
+            asof=asof,
+        ))
 
-        entry_guide = box.top * (1.0 + s.breakout_buffer)
-        stop = float(box.bottom)
+        # Darvas 박스 — SKIP_DARVAS=true면 우회 (Stage 2 + Template만으로 매수)
+        if getattr(s, "skip_darvas", False):
+            last_close = float(bars["close"].iloc[-1])
+            entry_guide = last_close
+            stop_pct = float(getattr(s, "no_darvas_stop_pct", 7.0))
+            stop = entry_guide * (1.0 - stop_pct / 100.0)
+            box_top = entry_guide
+            box_bottom = stop
+            days_in_box = 0
+            vol_ratio = float("nan")
+            is_gap = False
+        else:
+            box = darvas.current_box(bars, box_params)
+            if not box.is_breakout or box.top is None or box.bottom is None:
+                continue
+            entry_guide = box.top * (1.0 + s.breakout_buffer)
+            stop = float(box.bottom)
+            box_top = float(box.top)
+            box_bottom = stop
+            days_in_box = int(box.days_in_box)
+            vol_ratio = float(box.volume_ratio) if box.volume_ratio is not None else float("nan")
+            is_gap = box.is_gap
+
         if entry_guide <= stop:
-            continue   # 비정상 박스
-
+            continue
         risk_per_share = entry_guide - stop
         size = _suggest_size(entry_guide, risk_per_share, sizing)
 
         new_buys.append(BuySignal(
-            ticker=td.ticker,
-            name=td.name,
-            market=td.market,
+            ticker=td.ticker, name=td.name, market=td.market,
             entry_guide=_tick_round(entry_guide, td.market),
             stop=_tick_round(stop, td.market),
             risk_per_share=risk_per_share,
             suggested_shares=size[0],
             suggested_size_krw=size[1],
-            box_top=float(box.top),
-            box_bottom=stop,
-            days_in_box=int(box.days_in_box),
-            volume_ratio=float(box.volume_ratio) if box.volume_ratio is not None else float("nan"),
-            is_gap_breakout=box.is_gap,
+            box_top=box_top, box_bottom=box_bottom,
+            days_in_box=days_in_box,
+            volume_ratio=vol_ratio,
+            is_gap_breakout=is_gap,
             rs_rank=rs_rank_value,
             stage_2_since=stage_since,
             template_pass=list(t.checks),
@@ -242,7 +287,10 @@ def generate_signals(
     free_slots = max(0, sizing.max_positions - len(portfolio))
     new_buys = new_buys[:free_slots]
 
-    return DailySignals(asof=asof, new_buys=new_buys, holds=holds, sells=sells)
+    # 워치리스트는 RS rank desc 정렬, 슬롯 무관 (사용자가 보고 선택)
+    watchlist.sort(key=lambda w: (-w.rs_rank if not pd.isna(w.rs_rank) else 0, -w.days_in_box))
+
+    return DailySignals(asof=asof, new_buys=new_buys, holds=holds, sells=sells, watchlist=watchlist)
 
 
 # ============================================================
@@ -401,4 +449,5 @@ def to_dict(sigs: DailySignals) -> dict[str, Any]:
         "new_buys": [b.__dict__ for b in sigs.new_buys],
         "holds": [h.__dict__ for h in sigs.holds],
         "sells": [s.__dict__ for s in sigs.sells],
+        "watchlist": [w.__dict__ for w in sigs.watchlist],
     }
