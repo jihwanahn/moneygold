@@ -19,6 +19,7 @@ from tqdm import tqdm
 from ..universe import fetch_master_from_pykrx, filter_master
 from . import store
 from .kis_client import KISAPIError, KISClient
+from .. import fundamentals as fund
 
 log = logging.getLogger(__name__)
 
@@ -184,4 +185,36 @@ class DataSync:
             else:
                 stats["no_change"] += 1
                 log.info("Index %s: no change", code)
+        return stats
+
+    # ----------- Fundamentals (KIS finance 엔드포인트) -----------
+
+    def sync_financials_for(
+        self,
+        tickers: list[str],
+        *,
+        force: bool = False,
+        progress: bool = True,
+    ) -> dict:
+        """종목별 분기 펀더멘털 sync. 종목당 2회 KIS 호출 (income stmt + financial ratio).
+
+        force=True면 캐시 무시하고 재 호출. False면 캐시 있는 종목 skip.
+        """
+        stats = {"total": len(tickers), "updated": 0, "cached": 0, "failed": []}
+        it = tqdm(tickers, desc="financials", unit="tk") if progress else tickers
+        for tk in it:
+            path = fund.financials_path(self.data_dir, tk)
+            if path.exists() and not force:
+                stats["cached"] += 1
+                continue
+            try:
+                r = fund.fetch_and_cache(self.kis, self.data_dir, tk, force=force)
+                if r.error:
+                    stats["failed"].append((tk, r.error))
+                elif not r.quarters.empty:
+                    stats["updated"] += 1
+                else:
+                    stats["failed"].append((tk, "empty quarters"))
+            except Exception as e:
+                stats["failed"].append((tk, str(e)))
         return stats

@@ -22,8 +22,9 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from . import darvas, indicators as ind, stage as stg, template as tmpl
+from . import darvas, fundamentals as fund, indicators as ind, stage as stg, template as tmpl
 from .config import AppConfig
+from .data import store
 
 
 # ============================================================
@@ -116,6 +117,13 @@ class WatchlistEntry:
     box_bottom: float | None
     days_in_box: int
     suggested_stop: float    # box_bottom 있으면 그것, 없으면 close × 0.93
+    # 펀더멘털 (캐시된 KIS finance 분기). 데이터 없으면 NaN.
+    revenue_yoy: float = float("nan")        # 매출 YoY (%)
+    op_income_yoy: float = float("nan")      # 영업이익 YoY (%)
+    op_margin: float = float("nan")          # 영업이익률 (%)
+    growth_quarters: int = 0                  # 연속 매출 성장 분기 수
+    op_growth_quarters: int = 0               # 연속 영업이익 성장 분기 수
+    accelerating: bool = False                # YoY 가속 여부
     asof: str = ""
 
 
@@ -140,6 +148,7 @@ def generate_signals(
     idx_close_by_market: dict[str, pd.Series],
     cfg: AppConfig,
     rs_momentum_map: dict[str, float] | None = None,
+    fundamentals_map: dict[str, fund.FundamentalsResult] | None = None,
 ) -> DailySignals:
     """일일 시그널 생성.
 
@@ -229,6 +238,23 @@ def generate_signals(
         last_close = float(bars["close"].iloc[-1])
         suggested_stop = float(box_for_watch.bottom) if box_for_watch.bottom is not None else last_close * 0.93
         rs_mom_value = float(rs_momentum_map.get(td.ticker, float("nan"))) if rs_momentum_map else float("nan")
+
+        f_entry = fundamentals_map.get(td.ticker) if fundamentals_map else None
+        if f_entry is not None and f_entry.quarters is not None and not f_entry.quarters.empty:
+            f_revenue_yoy = f_entry.latest_revenue_yoy
+            f_op_yoy = f_entry.latest_op_income_yoy
+            f_op_margin = f_entry.latest_op_margin
+            f_growth_q = f_entry.growth_quarters
+            f_op_growth_q = f_entry.op_growth_quarters
+            f_accelerating = f_entry.accelerating
+        else:
+            f_revenue_yoy = float("nan")
+            f_op_yoy = float("nan")
+            f_op_margin = float("nan")
+            f_growth_q = 0
+            f_op_growth_q = 0
+            f_accelerating = False
+
         watchlist.append(WatchlistEntry(
             ticker=td.ticker, name=td.name, market=td.market,
             close=last_close, rs_rank=rs_rank_value, rs_momentum=rs_mom_value,
@@ -237,6 +263,9 @@ def generate_signals(
             box_bottom=float(box_for_watch.bottom) if box_for_watch.bottom is not None else None,
             days_in_box=int(box_for_watch.days_in_box),
             suggested_stop=suggested_stop,
+            revenue_yoy=f_revenue_yoy, op_income_yoy=f_op_yoy, op_margin=f_op_margin,
+            growth_quarters=f_growth_q, op_growth_quarters=f_op_growth_q,
+            accelerating=f_accelerating,
             asof=asof,
         ))
 

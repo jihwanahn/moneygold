@@ -317,6 +317,56 @@ class KISClient:
         return _normalize_bars(ticker, all_rows, start_inclusive=start, end_inclusive=end)
 
 
+    # ---------- Finance (분기/연간) ----------
+
+    def fetch_finance_table(
+        self,
+        ticker: str,
+        path: str,
+        tr_id: str,
+        *,
+        div_cls: str = "1",  # "0"=년간, "1"=분기
+    ) -> pd.DataFrame:
+        """KIS 재무 엔드포인트 범용 호출. output 리스트를 DataFrame으로.
+
+        모든 finance/* 엔드포인트가 같은 파라미터 패턴을 씀.
+        """
+        params = {
+            "FID_DIV_CLS_CODE": div_cls,
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_INPUT_ISCD": ticker,
+        }
+        data = self._get(path, tr_id, params)
+        rows = data.get("output", []) or []
+        if not rows:
+            return pd.DataFrame()
+        df = pd.DataFrame(rows)
+        # stac_yymm을 첫 컬럼으로
+        if "stac_yymm" in df.columns:
+            df = df.sort_values("stac_yymm").reset_index(drop=True)   # 오래된 → 최신
+        return df
+
+    def fetch_income_statement(self, ticker: str, *, quarterly: bool = True) -> pd.DataFrame:
+        """손익계산서. 분기 응답은 *YTD 누적* (1Q, 1H, 3Q, FY 순으로 누적된 값)."""
+        return self.fetch_finance_table(
+            ticker, ep.Path.FINANCE_INCOME_STMT, ep.TrId.FINANCE_INCOME_STMT,
+            div_cls="1" if quarterly else "0",
+        )
+
+    def fetch_financial_ratios(self, ticker: str, *, quarterly: bool = True) -> pd.DataFrame:
+        """재무비율. grs(매출성장률), bsop_prfi_inrt, eps, sps, bps, roe_val 등."""
+        return self.fetch_finance_table(
+            ticker, ep.Path.FINANCE_RATIO, ep.TrId.FINANCE_RATIO,
+            div_cls="1" if quarterly else "0",
+        )
+
+    def fetch_profit_ratios(self, ticker: str, *, quarterly: bool = True) -> pd.DataFrame:
+        """수익성비율. 자기자본순이익률, 매출순이익률 등."""
+        return self.fetch_finance_table(
+            ticker, ep.Path.FINANCE_PROFIT_RATIO, ep.TrId.FINANCE_PROFIT_RATIO,
+            div_cls="1" if quarterly else "0",
+        )
+
     # ---------- Index bars ----------
 
     def fetch_index_bars(

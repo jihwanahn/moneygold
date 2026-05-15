@@ -21,6 +21,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from moneygold import darvas as dv  # noqa: E402
+from moneygold import fundamentals as fund  # noqa: E402
 from moneygold import indicators as ind  # noqa: E402
 from moneygold import signals as sg  # noqa: E402
 from moneygold import stage as stg  # noqa: E402
@@ -104,8 +105,18 @@ def _run_signals(_data_dir_str: str, asof: str) -> dict:
     rs_rank_map = dict(zip(rs_df["ticker"], rs_df["rs_rank"]))
     rs_mom_map = dict(zip(rs_df["ticker"], rs_df["rs_mom"]))
 
+    # 캐시된 펀더멘털 로드
+    fundamentals_map: dict[str, fund.FundamentalsResult] = {}
+    for td in tickers:
+        p = fund.financials_path(data_dir, td.ticker)
+        if p.exists():
+            q = store.read_parquet_safe(p)
+            if q is not None and not q.empty:
+                fundamentals_map[td.ticker] = fund.build_fundamentals_from_cache(q)
+
     sigs = sg.generate_signals(
-        asof, tickers, {}, rs_rank_map, indices, cfg, rs_momentum_map=rs_mom_map,
+        asof, tickers, {}, rs_rank_map, indices, cfg,
+        rs_momentum_map=rs_mom_map, fundamentals_map=fundamentals_map,
     )
     return sg.to_dict(sigs)
 
@@ -165,6 +176,25 @@ with st.sidebar:
         mcap_max_krw = mcap_range_trillion[1] * 1e12
     else:
         mcap_min_krw = mcap_max_krw = None
+
+    st.divider()
+    st.subheader("📊 펀더멘털 필터")
+    min_revenue_yoy = st.slider(
+        "매출 YoY 최소 (%)", min_value=-50, max_value=100, value=-50, step=5,
+        help="가장 최근 분기 매출 YoY 성장률. 25% 이상이 미네비니 권장.",
+    )
+    min_op_margin = st.slider(
+        "영업이익률 최소 (%)", min_value=-30, max_value=50, value=-30, step=1,
+        help="가장 최근 분기 영업이익률 (영업이익 ÷ 매출).",
+    )
+    min_growth_q = st.slider(
+        "연속 매출 성장 분기", min_value=0, max_value=12, value=0,
+        help="매출 YoY > 0이 연속 N분기 이상. 4 이상이 좋은 신호.",
+    )
+    only_accelerating = st.checkbox(
+        "가속 종목만 (YoY 가속)",
+        help="최근 분기 YoY가 직전 분기 YoY보다 큰 종목 (모멘텀 가속).",
+    )
 
     st.divider()
     top_n = st.number_input("워치리스트 표시 개수", min_value=5, max_value=2000, value=30, step=5,
@@ -240,6 +270,15 @@ if not watchlist_df.empty:
         flt = flt[flt["sector"].isin(sectors)]
     if mcap_min_krw is not None and "mcap" in flt.columns:
         flt = flt[(flt["mcap"] >= mcap_min_krw) & (flt["mcap"] <= mcap_max_krw)]
+    # 펀더멘털 필터 (NaN은 통과 — 데이터 없는 종목은 거르지 않음)
+    if "revenue_yoy" in flt.columns and min_revenue_yoy > -50:
+        flt = flt[flt["revenue_yoy"].fillna(min_revenue_yoy) >= min_revenue_yoy]
+    if "op_margin" in flt.columns and min_op_margin > -30:
+        flt = flt[flt["op_margin"].fillna(min_op_margin) >= min_op_margin]
+    if "growth_quarters" in flt.columns and min_growth_q > 0:
+        flt = flt[flt["growth_quarters"].fillna(0) >= min_growth_q]
+    if only_accelerating and "accelerating" in flt.columns:
+        flt = flt[flt["accelerating"] == True]
     flt = flt.sort_values("rs_rank", ascending=False).reset_index(drop=True)
 else:
     flt = watchlist_df
@@ -255,18 +294,24 @@ with left:
         selected_ticker = None
     else:
         base_cols = ["ticker", "name", "market"]
-        extra_cols = []
-        if "sector" in flt.columns: extra_cols.append("sector")
-        if "mcap" in flt.columns: extra_cols.append("mcap")
-        base_cols.extend(extra_cols)
+        if "sector" in flt.columns: base_cols.append("sector")
+        if "mcap" in flt.columns: base_cols.append("mcap")
         base_cols.extend(["rs_rank", "rs_momentum", "close", "box_state",
                           "days_in_box", "suggested_stop"])
+        # 펀더멘털 컬럼
+        for c in ["revenue_yoy", "op_income_yoy", "op_margin",
+                  "growth_quarters", "op_growth_quarters", "accelerating"]:
+            if c in flt.columns:
+                base_cols.append(c)
         disp = flt[base_cols].head(top_n).copy()
         disp["rs_rank"] = disp["rs_rank"].round(1)
         disp["rs_momentum"] = disp["rs_momentum"].round(2)
         if "mcap" in disp.columns:
             disp["mcap_trillion"] = (disp["mcap"] / 1e12).round(3)
             disp = disp.drop(columns=["mcap"])
+        for c in ["revenue_yoy", "op_income_yoy", "op_margin"]:
+            if c in disp.columns:
+                disp[c] = disp[c].round(1)
 
         # 컬럼 라벨/포맷 + 툴팁
         col_cfg = {
@@ -284,6 +329,31 @@ with left:
             col_cfg["sector"] = st.column_config.TextColumn("업종", help=g.COL_SECTOR)
         if "mcap_trillion" in disp.columns:
             col_cfg["mcap_trillion"] = st.column_config.NumberColumn("시총(조)", format="%.2f", help=g.COL_MCAP_TRILLION)
+        # 펀더멘털
+        if "revenue_yoy" in disp.columns:
+            col_cfg["revenue_yoy"] = st.column_config.NumberColumn(
+                "매출YoY%", format="%+.1f",
+                help="가장 최근 분기 매출 YoY 성장률. 25% 이상이 미네비니 권장. NaN = 데이터 없음.")
+        if "op_income_yoy" in disp.columns:
+            col_cfg["op_income_yoy"] = st.column_config.NumberColumn(
+                "영익YoY%", format="%+.1f",
+                help="가장 최근 분기 영업이익 YoY 성장률.")
+        if "op_margin" in disp.columns:
+            col_cfg["op_margin"] = st.column_config.NumberColumn(
+                "영익률%", format="%.1f",
+                help="가장 최근 분기 영업이익률 = 영업이익 ÷ 매출.")
+        if "growth_quarters" in disp.columns:
+            col_cfg["growth_quarters"] = st.column_config.NumberColumn(
+                "연속매출↑", format="%d",
+                help="매출 YoY > 0이 연속 N분기. 8 = 2년 연속 성장.")
+        if "op_growth_quarters" in disp.columns:
+            col_cfg["op_growth_quarters"] = st.column_config.NumberColumn(
+                "연속영익↑", format="%d",
+                help="영업이익 YoY > 0이 연속 N분기.")
+        if "accelerating" in disp.columns:
+            col_cfg["accelerating"] = st.column_config.CheckboxColumn(
+                "가속",
+                help="최근 분기 YoY > 직전 분기 YoY (매출 또는 영업이익). 가속하는 종목은 추세 강세.")
 
         evt = st.dataframe(
             disp, use_container_width=True, hide_index=True, height=620,

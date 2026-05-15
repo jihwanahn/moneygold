@@ -21,6 +21,7 @@ from pathlib import Path
 import pandas as pd
 from tqdm import tqdm
 
+from .. import fundamentals as fund
 from .. import indicators as ind
 from .. import signals as sg
 from ..config import load_config
@@ -233,10 +234,21 @@ def main(argv: list[str] | None = None) -> int:
     if portfolio:
         log.info("Portfolio loaded: %d positions", len(portfolio))
 
+    # 캐시된 펀더멘털 로드
+    log.info("Loading cached fundamentals ...")
+    fundamentals_map: dict[str, fund.FundamentalsResult] = {}
+    for td in tickers:
+        path = fund.financials_path(data_dir, td.ticker)
+        if path.exists():
+            q = store.read_parquet_safe(path)
+            if q is not None and not q.empty:
+                fundamentals_map[td.ticker] = fund.build_fundamentals_from_cache(q)
+    log.info("Fundamentals loaded for %d tickers", len(fundamentals_map))
+
     log.info("Generating signals as of %s ...", asof)
     sigs = sg.generate_signals(
         asof, tickers, portfolio, rs_rank_map, idx_close_by_market, cfg,
-        rs_momentum_map=rs_momentum_map,
+        rs_momentum_map=rs_momentum_map, fundamentals_map=fundamentals_map,
     )
 
     _print_report(sigs, master, watchlist_top=args.top)

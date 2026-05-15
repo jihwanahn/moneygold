@@ -45,12 +45,15 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--backfill", action="store_true", help="마스터 + 종목 2년 백필 + 지수")
     mode.add_argument("--daily", action="store_true", help="마스터 + 일일 incremental + 지수 (기본)")
     mode.add_argument("--indices", action="store_true", help="지수만 sync")
+    mode.add_argument("--financials", action="store_true", help="펀더멘털만 sync (KIS finance 분기)")
 
     parser.add_argument("--tickers", help="특정 종목만. 콤마 구분. 예: 005930,000660")
     parser.add_argument("--limit", type=int, help="첫 N개 종목만 (디버그)")
     parser.add_argument("--years", type=int, default=2, help="백필 연수 (기본 2)")
     parser.add_argument("--asof", help="기준일 YYYYMMDD. 기본은 오늘.")
     parser.add_argument("--skip-indices", action="store_true", help="지수 sync 건너뛰기")
+    parser.add_argument("--force-financials", action="store_true",
+                        help="--financials 모드에서 캐시 무시 후 재 다운로드")
     args = parser.parse_args(argv)
 
     cfg = load_config()
@@ -58,11 +61,29 @@ def main(argv: list[str] | None = None) -> int:
     log = logging.getLogger("moneygold.cli.sync")
 
     # 모드 디폴트
-    if not (args.universe or args.backfill or args.daily or args.indices):
+    if not (args.universe or args.backfill or args.daily or args.indices or args.financials):
         args.daily = True
 
     kis = KISClient(cfg.kis)
     sync = DataSync(kis, Path(cfg.data_dir))
+
+    # 펀더멘털만
+    if args.financials:
+        log.info("== sync_financials_for ==")
+        if args.tickers:
+            tickers = _parse_tickers_arg(args.tickers) or []
+        else:
+            master = sync.load_universe()
+            tickers = master["ticker"].tolist()
+        if args.limit:
+            tickers = tickers[: args.limit]
+        log.info("Target tickers: %d (force=%s)", len(tickers), args.force_financials)
+        stats = sync.sync_financials_for(tickers, force=args.force_financials)
+        log.info("Financials: total=%d updated=%d cached=%d failed=%d",
+                 stats["total"], stats["updated"], stats["cached"], len(stats["failed"]))
+        for tk, err in stats["failed"][:20]:
+            log.warning("  %s: %s", tk, err)
+        return 0
 
     # 지수만
     if args.indices:

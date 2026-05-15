@@ -18,6 +18,12 @@ class Path:
     INVESTOR_FLOW = "/uapi/domestic-stock/v1/quotations/inquire-investor"
     INDEX_DAILY_CHART = "/uapi/domestic-stock/v1/quotations/inquire-daily-indexchartprice"
 
+    # 국내주식 재무 (분기/연간)
+    FINANCE_INCOME_STMT = "/uapi/domestic-stock/v1/finance/income-statement"
+    FINANCE_BALANCE_SHEET = "/uapi/domestic-stock/v1/finance/balance-sheet"
+    FINANCE_RATIO = "/uapi/domestic-stock/v1/finance/financial-ratio"
+    FINANCE_PROFIT_RATIO = "/uapi/domestic-stock/v1/finance/profit-ratio"
+
     # 계좌 (read-only)
     BALANCE = "/uapi/domestic-stock/v1/trading/inquire-balance"
 
@@ -30,6 +36,11 @@ class TrId:
     INVESTOR_FLOW = "FHKST01010900"
     INDEX_DAILY_CHART = "FHKUP03500100"
     BALANCE = "TTTC8434R"
+    # Finance
+    FINANCE_INCOME_STMT = "FHKST66430200"
+    FINANCE_BALANCE_SHEET = "FHKST66430100"
+    FINANCE_RATIO = "FHKST66430300"
+    FINANCE_PROFIT_RATIO = "FHKST66430400"
 
 
 # KIS 지수 코드 (FID_INPUT_ISCD).
