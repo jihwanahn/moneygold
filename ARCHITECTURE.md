@@ -485,56 +485,56 @@ for biz_date in trading_days(start, end):
 | RS 분모 | KOSPI 종목 vs KOSPI200, KOSDAQ 종목 vs KOSDAQ150 (분리) |
 | 휴장일 | KIS 응답이 빈 응답/에러일 수 있음. sync는 거래일 캘린더(`get_market_open_dates` 또는 자체 보관)로 사전 판단 |
 
-## 12. 디렉토리 구조
+## 12. 디렉토리 구조 (PR6까지 반영)
 
 ```
 moneygold/
   ARCHITECTURE.md
-  CLAUDE.md                # PR1 시작 시 v2 기준 재작성
-  README.md                # 운영 가이드 (cron 설정 등)
-  pyproject.toml
-  .env.example
+  CLAUDE.md
+  README.md                  # 5단계 Quickstart + 명령 치트시트
+  pyproject.toml             # ui extra: streamlit/plotly
+  .env.example               # KRX·KIS 키만 채우면 동작
   .gitignore
+  .streamlit/config.toml     # runOnSave 등
 
   src/moneygold/
-    __init__.py
-    config.py              # env 로드, dataclass 설정
+    config.py                # env 로드, frozen dataclass
+    indicators.py            # SMA/ATR/52w/RS/slope_normalized
+    stage.py                 # Weinstein 4-stage 상태머신
+    template.py              # Minervini 8 조건
+    darvas.py                # 박스 상태머신
+    fundamentals.py          # KIS 분기 손익 정규화 + YoY/연속/가속
+    consensus.py             # yfinance 컨센서스 + revision 추세
+    signals.py               # 합성 → DailySignals (watchlist 포함)
+    backtest.py              # 워크포워드 시뮬레이터
+    universe.py              # pykrx 마스터 + sector + mcap
     data/
-      __init__.py
-      kis_client.py
-      kis_endpoints.py     # tr_id 매핑
-      mcp_tools.py
-      store.py             # parquet read/write (atomic, dedup)
-      sync.py              # 일일 incremental
-    universe.py
-    indicators.py
-    stage.py
-    template.py
-    darvas.py
-    signals.py
-    portfolio.py
-    sizing.py
-    risk_news.py
-    fundamentals.py
-    backtest.py
-    report.py
-    notify.py
-    cli/
-      __init__.py
-      sync.py              # python -m moneygold.cli.sync
-      classify.py
-      signals.py
-      backtest.py
-      sync_portfolio.py
-      daily.py             # sync → portfolio → signals → notify
-  store/                   # 데이터 (gitignored)
-  tests/
-    test_indicators.py
-    test_stage.py
-    test_darvas.py
-    test_signals.py
-    test_backtest_smoke.py
-    fixtures/              # KIS 응답 픽스처 (vcr.py 또는 정적 JSON)
+      kis_client.py          # OAuth, rate limit, 페이지네이션, 재시도
+      kis_endpoints.py       # URL + tr_id 매핑 (시세·재무 모두)
+      store.py               # atomic parquet read/write
+      sync.py                # DataSync 오케스트레이터
+    app/                     # Streamlit 대시보드 (PR5)
+      streamlit_app.py
+      charts.py              # plotly 빌더 (캔들+MA+박스+Stage 배경)
+      _glossary.py           # 사이드바·컬럼·박스 설명 텍스트
+    cli/                     # python -m moneygold.cli.<name>
+      sync.py · signals.py · classify.py · backtest.py
+
+  scripts/                   # 진단 도구
+    verify_kis.py · probe_kis_finance.py
+    inspect_template.py · inspect_stage.py · funnel.py
+    sweep_*.sh
+
+  store/                     # 데이터 (gitignored)
+    bars/{ticker}.parquet
+    index/{code}.parquet     # KOSPI / KOSDAQ / KOSPI200 / KOSDAQ150
+    meta/master.parquet      # ticker, name, market, sector, mcap
+    financials/{ticker}.parquet     # 분기 매출/영익/EPS
+    consensus/{ticker}.json         # yfinance 캐시 (per ticker JSON)
+    signals/{biz_date}.json         # 일일 시그널 export
+    logs/{yyyymm}.jsonl
+
+  tests/                     # 100+ tests
 ```
 
 ## 13. 설정 / 환경 변수
@@ -602,17 +602,21 @@ BENCHMARK_INDEX=KOSPI    # 백테스트 비교 지수
 
 ## 14. PR 로드맵
 
-| PR | 범위 | 외부 의존 |
-| --- | --- | --- |
-| **PR0** ✅ | `git init` + 레거시 격리/삭제 + 본 문서 + `.gitignore`/`pyproject.toml`/`.env.example` 스캐폴드 + KIS 사전검증 (결과: §2 반영 완료) | — |
-| **PR1** | `kis_client` + `store` + `universe` + `sync` CLI. 2년 백필 + 일일 incremental. | KIS |
-| **PR2** | `indicators` + `stage` + `classify` CLI | — |
-| **PR3** | `template` + `darvas` + `signals` + `supply_demand` 통합 + `signals` CLI. **이 시점부터 일일 사용 가능** | MCP |
-| **PR4** | `backtest` + 파라미터 튜닝 + 벤치마크 비교 | — |
-| **PR5** | `portfolio` + KIS 잔고 동기화 + 신규 보유 자동감지 + SELL/HOLD + 트레일링 | KIS |
-| **PR6** | `risk_news` + `fundamentals` 사이드카 + **알림(Slack/Telegram)** + 리포트 강화 + cron 가이드 | MCP, Slack/Telegram |
+| PR | 범위 | 외부 의존 | 상태 |
+| --- | --- | --- | --- |
+| PR0 | `git init` + 레거시 격리/삭제 + 스캐폴드 + KIS 사전검증 | — | ✅ |
+| PR1 | `kis_client` + `store` + `universe` + `sync` CLI. 2년 백필 + 일일 incremental | KIS | ✅ |
+| PR2 | `indicators` + `stage` + `classify` CLI | — | ✅ |
+| PR3 | `template` + `darvas` + `signals` + `signals` CLI | — | ✅ |
+| PR4 | `backtest` + 파라미터 튜닝 + 벤치마크 비교. 원전 비교로 임계 재튜닝 | — | ✅ |
+| PR5(UI) | `app/streamlit_app.py` + `charts.py` + 글로서리 툴팁 | streamlit/plotly | ✅ |
+| PR6(F) | `universe`에 sector + 정확한 시총 (pykrx). 워치리스트 업종/시총 필터 | pykrx | ✅ |
+| PR6(K) | `fundamentals` — KIS 분기 손익 + YoY/연속 성장/가속. 필터 + 컬럼 | KIS | ✅ |
+| PR6(C) | `consensus` — yfinance 목표가/추정 EPS + 30일 상향 조정 추세 | yfinance | ✅ |
+| PR7 | `portfolio` + KIS 잔고 동기화 + SELL/HOLD + 트레일링 | KIS | ⬜ |
+| PR8 | `risk_news` + 알림(Slack/Telegram) + 리포트 강화 + cron 가이드 | (선택) | ⬜ |
 
-**자동 주문 PR 없음.** 향후 라이브 트레이딩 필요 시 별도 설계 단계 다시 진행.
+**자동 주문 없음.** 향후 라이브 트레이딩 필요 시 별도 설계 단계 다시 진행.
 
 PR3 머지 시점부터 시그널이 의미 있게 동작하나, PR4 백테스트 검증 전엔 시그널의 신뢰도가 미지수임을 사용자에게 README로 안내.
 

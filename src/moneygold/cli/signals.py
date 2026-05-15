@@ -21,6 +21,7 @@ from pathlib import Path
 import pandas as pd
 from tqdm import tqdm
 
+from .. import consensus as cons
 from .. import fundamentals as fund
 from .. import indicators as ind
 from .. import signals as sg
@@ -245,10 +246,25 @@ def main(argv: list[str] | None = None) -> int:
                 fundamentals_map[td.ticker] = fund.build_fundamentals_from_cache(q)
     log.info("Fundamentals loaded for %d tickers", len(fundamentals_map))
 
+    # 캐시된 컨센서스 로드
+    log.info("Loading cached consensus ...")
+    consensus_map: dict[str, cons.ConsensusResult] = {}
+    import json
+    for td in tickers:
+        p = cons.consensus_path(data_dir, td.ticker)
+        if p.exists():
+            try:
+                consensus_map[td.ticker] = cons.from_dict(json.loads(p.read_text()))
+            except Exception:
+                pass
+    log.info("Consensus loaded for %d tickers", len(consensus_map))
+
     log.info("Generating signals as of %s ...", asof)
     sigs = sg.generate_signals(
         asof, tickers, portfolio, rs_rank_map, idx_close_by_market, cfg,
-        rs_momentum_map=rs_momentum_map, fundamentals_map=fundamentals_map,
+        rs_momentum_map=rs_momentum_map,
+        fundamentals_map=fundamentals_map,
+        consensus_map=consensus_map,
     )
 
     _print_report(sigs, master, watchlist_top=args.top)

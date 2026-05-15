@@ -46,6 +46,7 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--daily", action="store_true", help="마스터 + 일일 incremental + 지수 (기본)")
     mode.add_argument("--indices", action="store_true", help="지수만 sync")
     mode.add_argument("--financials", action="store_true", help="펀더멘털만 sync (KIS finance 분기)")
+    mode.add_argument("--consensus", action="store_true", help="컨센서스만 sync (yfinance, 대형주 위주)")
 
     parser.add_argument("--tickers", help="특정 종목만. 콤마 구분. 예: 005930,000660")
     parser.add_argument("--limit", type=int, help="첫 N개 종목만 (디버그)")
@@ -54,6 +55,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--skip-indices", action="store_true", help="지수 sync 건너뛰기")
     parser.add_argument("--force-financials", action="store_true",
                         help="--financials 모드에서 캐시 무시 후 재 다운로드")
+    parser.add_argument("--force-consensus", action="store_true",
+                        help="--consensus 모드에서 캐시 무시 후 재 다운로드")
     args = parser.parse_args(argv)
 
     cfg = load_config()
@@ -61,11 +64,31 @@ def main(argv: list[str] | None = None) -> int:
     log = logging.getLogger("moneygold.cli.sync")
 
     # 모드 디폴트
-    if not (args.universe or args.backfill or args.daily or args.indices or args.financials):
+    if not (args.universe or args.backfill or args.daily or args.indices or args.financials or args.consensus):
         args.daily = True
 
     kis = KISClient(cfg.kis)
     sync = DataSync(kis, Path(cfg.data_dir))
+
+    # 컨센서스만 (KIS 무관, yfinance만)
+    if args.consensus:
+        from .. import consensus as cons
+        log.info("== sync_consensus (yfinance) ==")
+        master = sync.load_universe()
+        rows = list(zip(master["ticker"], master["market"]))
+        if args.tickers:
+            wanted = set(_parse_tickers_arg(args.tickers) or [])
+            rows = [(t, m) for t, m in rows if t in wanted]
+        if args.limit:
+            rows = rows[: args.limit]
+        log.info("Target tickers: %d (force=%s)", len(rows), args.force_consensus)
+        stats = cons.sync_consensus_for(Path(cfg.data_dir), rows, force=args.force_consensus)
+        log.info("Consensus: total=%d available=%d no_data=%d cached=%d failed=%d",
+                 stats["total"], stats["available"], stats["no_data"],
+                 stats["cached"], len(stats["failed"]))
+        for tk, err in stats["failed"][:10]:
+            log.warning("  %s: %s", tk, err)
+        return 0
 
     # 펀더멘털만
     if args.financials:

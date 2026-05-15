@@ -22,6 +22,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from . import consensus as cons
 from . import darvas, fundamentals as fund, indicators as ind, stage as stg, template as tmpl
 from .config import AppConfig
 from .data import store
@@ -124,6 +125,21 @@ class WatchlistEntry:
     growth_quarters: int = 0                  # 연속 매출 성장 분기 수
     op_growth_quarters: int = 0               # 연속 영업이익 성장 분기 수
     accelerating: bool = False                # YoY 가속 여부
+    # 컨센서스 (캐시된 yfinance). 데이터 없으면 NaN/None.
+    cons_n_analysts: int = 0
+    cons_target_mean: float = float("nan")
+    cons_target_upside_pct: float = float("nan")   # (target_mean - close) / close × 100
+    cons_recommendation: str | None = None
+    cons_forward_pe: float = float("nan")
+    cons_earnings_growth: float = float("nan")     # 예상 EPS 성장 (%)
+    cons_revenue_growth: float = float("nan")      # 예상 매출 성장 (%)
+    cons_last_surprise_pct: float = float("nan")
+    # 컨센서스 *상향 조정* 추세
+    cons_rev_eps_0y_30d_pct: float = float("nan")     # 이번 연도 EPS 추정 30일 전 대비 변화 (%)
+    cons_rev_eps_0q_30d_pct: float = float("nan")     # 이번 분기 EPS 추정 30일 전 대비
+    cons_eps_ups_30d: int = 0                          # 30일간 상향 분석가 수 (이번 연도)
+    cons_eps_downs_30d: int = 0
+    cons_eps_net_revisions_30d: int = 0                # ups - downs
     asof: str = ""
 
 
@@ -149,6 +165,7 @@ def generate_signals(
     cfg: AppConfig,
     rs_momentum_map: dict[str, float] | None = None,
     fundamentals_map: dict[str, fund.FundamentalsResult] | None = None,
+    consensus_map: dict[str, cons.ConsensusResult] | None = None,
 ) -> DailySignals:
     """일일 시그널 생성.
 
@@ -255,6 +272,28 @@ def generate_signals(
             f_op_growth_q = 0
             f_accelerating = False
 
+        c_entry = consensus_map.get(td.ticker) if consensus_map else None
+        if c_entry is not None and c_entry.available:
+            c_n = c_entry.n_analysts
+            c_tm = c_entry.target_mean if c_entry.target_mean else float("nan")
+            c_upside = ((c_tm - last_close) / last_close * 100.0) if (c_tm and last_close > 0) else float("nan")
+            c_rec = c_entry.recommendation
+            c_fpe = c_entry.forward_pe if c_entry.forward_pe else float("nan")
+            c_eg = (c_entry.earnings_growth * 100.0) if c_entry.earnings_growth is not None else float("nan")
+            c_rg = (c_entry.revenue_growth * 100.0) if c_entry.revenue_growth is not None else float("nan")
+            c_ls = c_entry.last_surprise_pct if c_entry.last_surprise_pct is not None else float("nan")
+            c_rev_0y = c_entry.rev_eps_0y_30d_pct if c_entry.rev_eps_0y_30d_pct is not None else float("nan")
+            c_rev_0q = c_entry.rev_eps_0q_30d_pct if c_entry.rev_eps_0q_30d_pct is not None else float("nan")
+            c_ups = int(c_entry.eps_ups_30d) if c_entry.eps_ups_30d is not None else 0
+            c_dwns = int(c_entry.eps_downs_30d) if c_entry.eps_downs_30d is not None else 0
+            c_net = c_ups - c_dwns
+        else:
+            c_n = 0; c_tm = float("nan"); c_upside = float("nan")
+            c_rec = None; c_fpe = float("nan"); c_eg = float("nan")
+            c_rg = float("nan"); c_ls = float("nan")
+            c_rev_0y = float("nan"); c_rev_0q = float("nan")
+            c_ups = 0; c_dwns = 0; c_net = 0
+
         watchlist.append(WatchlistEntry(
             ticker=td.ticker, name=td.name, market=td.market,
             close=last_close, rs_rank=rs_rank_value, rs_momentum=rs_mom_value,
@@ -266,6 +305,13 @@ def generate_signals(
             revenue_yoy=f_revenue_yoy, op_income_yoy=f_op_yoy, op_margin=f_op_margin,
             growth_quarters=f_growth_q, op_growth_quarters=f_op_growth_q,
             accelerating=f_accelerating,
+            cons_n_analysts=c_n, cons_target_mean=c_tm, cons_target_upside_pct=c_upside,
+            cons_recommendation=c_rec, cons_forward_pe=c_fpe,
+            cons_earnings_growth=c_eg, cons_revenue_growth=c_rg,
+            cons_last_surprise_pct=c_ls,
+            cons_rev_eps_0y_30d_pct=c_rev_0y, cons_rev_eps_0q_30d_pct=c_rev_0q,
+            cons_eps_ups_30d=c_ups, cons_eps_downs_30d=c_dwns,
+            cons_eps_net_revisions_30d=c_net,
             asof=asof,
         ))
 

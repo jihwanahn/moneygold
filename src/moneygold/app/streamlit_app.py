@@ -20,6 +20,7 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from moneygold import consensus as cons  # noqa: E402
 from moneygold import darvas as dv  # noqa: E402
 from moneygold import fundamentals as fund  # noqa: E402
 from moneygold import indicators as ind  # noqa: E402
@@ -114,9 +115,22 @@ def _run_signals(_data_dir_str: str, asof: str) -> dict:
             if q is not None and not q.empty:
                 fundamentals_map[td.ticker] = fund.build_fundamentals_from_cache(q)
 
+    # 캐시된 컨센서스 로드
+    consensus_map: dict[str, cons.ConsensusResult] = {}
+    import json
+    for td in tickers:
+        p = cons.consensus_path(data_dir, td.ticker)
+        if p.exists():
+            try:
+                consensus_map[td.ticker] = cons.from_dict(json.loads(p.read_text()))
+            except Exception:
+                pass
+
     sigs = sg.generate_signals(
         asof, tickers, {}, rs_rank_map, indices, cfg,
-        rs_momentum_map=rs_mom_map, fundamentals_map=fundamentals_map,
+        rs_momentum_map=rs_mom_map,
+        fundamentals_map=fundamentals_map,
+        consensus_map=consensus_map,
     )
     return sg.to_dict(sigs)
 
@@ -197,6 +211,26 @@ with st.sidebar:
     )
 
     st.divider()
+    st.subheader("🎯 컨센서스 필터")
+    min_n_analysts = st.slider(
+        "최소 애널리스트 수", 0, 40, 0,
+        help="0 = 컨센서스 무관. 5+ 권장 (소수만 커버하는 종목은 신뢰도 낮음). yfinance 한국 종목 대형주만 풍부.",
+    )
+    min_upside_pct = st.slider(
+        "목표가 대비 상승여력 최소 (%)", -50, 200, -50, step=5,
+        help="(애널 평균 목표가 - 현재가) / 현재가. 양수 = 목표가 위에 있다는 뜻. NaN(데이터 없음)은 통과.",
+    )
+    min_eps_revision_0y_pct = st.slider(
+        "이번 연도 EPS 추정 상향 폭 최소 (%)", -50, 100, -50, step=1,
+        help="30일 전 추정 대비 *현재* 추정의 변화. 양수 = 애널들이 추정을 *상향 조정* 중. "
+             "이게 양수면서 큰 종목 = CAN SLIM 'C' + 'N' (신추정고가). NaN은 통과.",
+    )
+    min_net_revisions = st.slider(
+        "30일 순 상향 분석가 수 최소", -20, 30, -20,
+        help="30일간 상향 조정한 분석가 수 - 하향 조정 수. 양수 = 더 많은 분석가가 추정을 올림.",
+    )
+
+    st.divider()
     top_n = st.number_input("워치리스트 표시 개수", min_value=5, max_value=2000, value=30, step=5,
                              help=g.TOOLTIP_TOP_N)
 
@@ -224,6 +258,8 @@ st.caption(
 
 with st.expander("❓ 이 대시보드 사용법 (처음 사용자 필독)", expanded=False):
     st.markdown(g.INTRO_HELP)
+    st.markdown("---")
+    st.markdown(g.BOX_INTRO)
     st.markdown("---")
     st.markdown(g.CHART_LEGEND)
     st.markdown("---")
@@ -279,6 +315,15 @@ if not watchlist_df.empty:
         flt = flt[flt["growth_quarters"].fillna(0) >= min_growth_q]
     if only_accelerating and "accelerating" in flt.columns:
         flt = flt[flt["accelerating"] == True]
+    # 컨센서스 필터 (NaN/0 = 통과)
+    if "cons_n_analysts" in flt.columns and min_n_analysts > 0:
+        flt = flt[flt["cons_n_analysts"].fillna(0) >= min_n_analysts]
+    if "cons_target_upside_pct" in flt.columns and min_upside_pct > -50:
+        flt = flt[flt["cons_target_upside_pct"].fillna(min_upside_pct) >= min_upside_pct]
+    if "cons_rev_eps_0y_30d_pct" in flt.columns and min_eps_revision_0y_pct > -50:
+        flt = flt[flt["cons_rev_eps_0y_30d_pct"].fillna(min_eps_revision_0y_pct) >= min_eps_revision_0y_pct]
+    if "cons_eps_net_revisions_30d" in flt.columns and min_net_revisions > -20:
+        flt = flt[flt["cons_eps_net_revisions_30d"].fillna(0) >= min_net_revisions]
     flt = flt.sort_values("rs_rank", ascending=False).reset_index(drop=True)
 else:
     flt = watchlist_df
@@ -303,13 +348,21 @@ with left:
                   "growth_quarters", "op_growth_quarters", "accelerating"]:
             if c in flt.columns:
                 base_cols.append(c)
+        # 컨센서스 컬럼 (정적 + 상향 조정)
+        for c in ["cons_n_analysts", "cons_target_upside_pct", "cons_recommendation",
+                  "cons_earnings_growth", "cons_last_surprise_pct",
+                  "cons_rev_eps_0y_30d_pct", "cons_eps_net_revisions_30d"]:
+            if c in flt.columns:
+                base_cols.append(c)
         disp = flt[base_cols].head(top_n).copy()
         disp["rs_rank"] = disp["rs_rank"].round(1)
         disp["rs_momentum"] = disp["rs_momentum"].round(2)
         if "mcap" in disp.columns:
             disp["mcap_trillion"] = (disp["mcap"] / 1e12).round(3)
             disp = disp.drop(columns=["mcap"])
-        for c in ["revenue_yoy", "op_income_yoy", "op_margin"]:
+        for c in ["revenue_yoy", "op_income_yoy", "op_margin",
+                  "cons_target_upside_pct", "cons_earnings_growth", "cons_last_surprise_pct",
+                  "cons_rev_eps_0y_30d_pct"]:
             if c in disp.columns:
                 disp[c] = disp[c].round(1)
 
@@ -354,6 +407,36 @@ with left:
             col_cfg["accelerating"] = st.column_config.CheckboxColumn(
                 "가속",
                 help="최근 분기 YoY > 직전 분기 YoY (매출 또는 영업이익). 가속하는 종목은 추세 강세.")
+        # 컨센서스
+        if "cons_n_analysts" in disp.columns:
+            col_cfg["cons_n_analysts"] = st.column_config.NumberColumn(
+                "애널수", format="%d",
+                help="yfinance가 보유한 애널리스트 추정치 수. 5+ 신뢰도 OK. 한국 대형주는 20~38명.")
+        if "cons_target_upside_pct" in disp.columns:
+            col_cfg["cons_target_upside_pct"] = st.column_config.NumberColumn(
+                "목표가↑%", format="%+.1f",
+                help="(애널 평균 목표가 - 현재가) / 현재가. 양수 = 추가 상승여력 있다는 컨센서스.")
+        if "cons_recommendation" in disp.columns:
+            col_cfg["cons_recommendation"] = st.column_config.TextColumn(
+                "추천",
+                help="strong_buy / buy / hold / sell / strong_sell / none.")
+        if "cons_earnings_growth" in disp.columns:
+            col_cfg["cons_earnings_growth"] = st.column_config.NumberColumn(
+                "예상 EPS↑%", format="%+.1f",
+                help="향후 12개월 예상 EPS 성장률 (애널 평균).")
+        if "cons_last_surprise_pct" in disp.columns:
+            col_cfg["cons_last_surprise_pct"] = st.column_config.NumberColumn(
+                "최근 서프라이즈%", format="%+.1f",
+                help="가장 최근 분기 실적 - 컨센서스 예상 = 서프라이즈. 양수 = 어닝비트, 음수 = 어닝미스.")
+        if "cons_rev_eps_0y_30d_pct" in disp.columns:
+            col_cfg["cons_rev_eps_0y_30d_pct"] = st.column_config.NumberColumn(
+                "EPS상향%(30d)", format="%+.1f",
+                help="이번 연도 EPS 컨센서스 추정의 30일 전 대비 변화율. "
+                     "+10% 이상 = 애널들이 실적을 크게 상향 조정 중 (강한 신호).")
+        if "cons_eps_net_revisions_30d" in disp.columns:
+            col_cfg["cons_eps_net_revisions_30d"] = st.column_config.NumberColumn(
+                "순상향(30d)", format="%+d",
+                help="30일간 상향 분석가 수 - 하향 수. 양수 = 더 많은 분석가가 추정을 올림.")
 
         evt = st.dataframe(
             disp, use_container_width=True, hide_index=True, height=620,

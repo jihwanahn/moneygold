@@ -1,7 +1,7 @@
 [project]
 name = "moneygold"
 version = "0.1.0"
-description = "KOSPI/KOSDAQ swing-trading signal generator (Weinstein + Minervini + Darvas)"
+description = "KOSPI/KOSDAQ swing-trading watchlist (Weinstein + Minervini + Darvas + 펀더멘털 + 컨센서스)"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -13,6 +13,7 @@ dependencies = [
     "pydantic>=2.6",
     "tqdm>=4.66",
     "pykrx>=1.0.45",   # 종목 마스터 전용 (KIS 미제공). ARCHITECTURE §2 참조.
+    "yfinance>=0.2.40",  # 컨센서스(애널리스트 목표가/추정 EPS·매출) 전용. 대형주 위주 커버.
 ]
 
 [project.optional-dependencies]

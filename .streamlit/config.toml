@@ -1,0 +1,11 @@
+# Streamlit 개발 편의 설정.
+# moneygold 패키지 모듈 변경 시 sidebar "Rerun" 누르면 자동 새로고침되도록.
+
+[server]
+# 파일 변경 감지 강화: watchdog 사용 (기본 auto) + 폴링 백업
+fileWatcherType = "auto"
+runOnSave = true
+
+[runner]
+# import한 자식 모듈도 reload 후보로 고려
+fastReruns = true
