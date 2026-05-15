@@ -11,9 +11,36 @@ Weinstein Stage Analysis + Minervini Trend Template + Darvas Box + 펀더멘털 
 
 ---
 
-## 5단계 Quickstart
+## ⚡ 가장 빠른 시작 (스크립트)
 
-다른 누가 fork했어도 아래 5단계만 따라하면 동작합니다.
+자격증명만 발급해두면 아래 3개 명령으로 끝납니다.
+
+| 단계 | Linux / macOS | Windows (Anaconda Prompt) | 소요 |
+| --- | --- | --- | --- |
+| 1. 환경 + 의존성 + .env 복사 | `bash scripts/setup.sh` | `scripts\setup.bat` | ~3분 |
+|    *(중간에 .env 열어 ⭐ 4줄 채우기)* | | | — |
+| 2. 초기 데이터 수집 | `bash scripts/init_data.sh` | `scripts\init_data.bat` | ~60-100분 |
+| 3. 대시보드 실행 | `bash scripts/run_dashboard.sh` | `scripts\run_dashboard.bat` | — |
+
+매일 운영:
+
+```bash
+bash scripts/daily.sh     # 일봉 + 시그널 JSON export (~10분)
+# 또는 Windows: scripts\daily.bat
+```
+
+cron 등록 예 (영업일 17:00):
+```cron
+0 17 * * 1-5  cd /path/to/moneygold && bash scripts/daily.sh >> store/logs/daily.log 2>&1
+```
+
+> 환경 이름 변경하려면 `MONEYGOLD_ENV=myenv bash scripts/setup.sh` 처럼 전달.
+
+---
+
+## 5단계 Quickstart (수동)
+
+위 스크립트 없이 직접 명령을 입력하고 싶으면:
 
 ### 1) 필수 자격증명 발급
 
