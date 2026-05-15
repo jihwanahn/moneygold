@@ -73,30 +73,34 @@ def _build_ticker_data(
     asof: str,
     log: logging.Logger,
 ) -> list[sg.TickerData]:
-    """마스터의 종목별로 bars + mcap을 읽어와 TickerData 리스트 생성."""
+    """마스터의 종목별로 bars + mcap을 읽어와 TickerData 리스트 생성.
+
+    master에 'mcap' 컬럼이 있으면(pykrx sector classifications에서 받음) 그대로 사용.
+    없으면 value×50 거친 proxy로 fallback (구 마스터 호환).
+    """
+    has_real_mcap = "mcap" in master.columns
+    mcap_map = dict(zip(master["ticker"], master["mcap"])) if has_real_mcap else {}
+
     out: list[sg.TickerData] = []
     for row in master.itertuples(index=False):
         p = store.bars_path(data_dir, row.ticker)
         bars = store.read_parquet_safe(p)
         if bars is None or bars.empty:
             continue
-        # 시가총액 추정: 마지막 close × 평균 거래량 비율... 정확한 mcap이 없으니
-        # close × volume의 임의 비율로 대용. PR5에서 KIS 계좌 + 종목정보로 정확히.
-        # 현재는 close × value/close = value 자체를 mcap 대용 (정확하지 않음, 게이트 통과용)
         bars_clip = bars[bars["date"] <= asof]
         if bars_clip.empty:
             continue
-        # 시가총액 미보유 → 일단 평균 거래대금 × 임의 배수로 추정 (실제 PR5에서 교체)
-        avg_value = float(bars_clip["value"].tail(20).mean()) if "value" in bars_clip.columns else 0.0
-        mcap_proxy = avg_value * 50   # 매우 거친 대용. 백테스트엔 부적합, 라이브 게이트엔 충분.
+
+        if has_real_mcap and mcap_map.get(row.ticker, 0) > 0:
+            mcap = float(mcap_map[row.ticker])
+        else:
+            # fallback: 평균 거래대금 × 50 (구 master 또는 mcap=0인 종목)
+            avg_value = float(bars_clip["value"].tail(20).mean()) if "value" in bars_clip.columns else 0.0
+            mcap = avg_value * 50
 
         out.append(sg.TickerData(
-            ticker=row.ticker,
-            name=row.name,
-            market=row.market,
-            bars=bars,
-            mcap=mcap_proxy,
-            flagged=False,   # PR3+에서 KIS search-stock-info로 플래그 조회
+            ticker=row.ticker, name=row.name, market=row.market,
+            bars=bars, mcap=mcap, flagged=False,
         ))
     return out
 

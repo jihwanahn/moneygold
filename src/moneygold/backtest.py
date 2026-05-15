@@ -369,6 +369,10 @@ def _build_ticker_data_for_date(
     bars_lookup: dict[str, pd.DataFrame],
     asof: str,
 ) -> list[sg.TickerData]:
+    """master에 mcap 컬럼이 있으면 사용, 없으면 value×50 fallback."""
+    has_real_mcap = "mcap" in master.columns
+    mcap_map = dict(zip(master["ticker"], master["mcap"])) if has_real_mcap else {}
+
     out: list[sg.TickerData] = []
     for row in master.itertuples(index=False):
         df = bars_lookup.get(row.ticker)
@@ -377,11 +381,14 @@ def _build_ticker_data_for_date(
         bars = df.loc[df.index <= asof].copy().reset_index()
         if bars.empty or len(bars) < 252:
             continue
-        avg_value_20 = float(bars["value"].tail(20).mean()) if "value" in bars.columns else 0.0
-        mcap_proxy = avg_value_20 * 50   # PR5에서 정확한 시가총액으로 교체
+        if has_real_mcap and mcap_map.get(row.ticker, 0) > 0:
+            mcap = float(mcap_map[row.ticker])
+        else:
+            avg_value_20 = float(bars["value"].tail(20).mean()) if "value" in bars.columns else 0.0
+            mcap = avg_value_20 * 50
         out.append(sg.TickerData(
             ticker=row.ticker, name=row.name, market=row.market,
-            bars=bars, mcap=mcap_proxy, flagged=False,
+            bars=bars, mcap=mcap, flagged=False,
         ))
     return out
 

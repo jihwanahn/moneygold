@@ -71,6 +71,9 @@ def _run_signals(_data_dir_str: str, asof: str) -> dict:
     idx_kosdaq = idx_kosdaq[idx_kosdaq.index <= asof]
     indices = {"KOSPI": idx_kospi, "KOSDAQ": idx_kosdaq}
 
+    has_real_mcap = "mcap" in master.columns
+    mcap_map = dict(zip(master["ticker"], master["mcap"])) if has_real_mcap else {}
+
     # TickerData 구성
     tickers = []
     rs_rows = []
@@ -81,11 +84,14 @@ def _run_signals(_data_dir_str: str, asof: str) -> dict:
         bars = bars[bars["date"] <= asof].sort_values("date").reset_index(drop=True)
         if len(bars) < 253:
             continue
-        avg_value_20 = float(bars["value"].tail(20).mean()) if "value" in bars.columns else 0.0
-        mcap_proxy = avg_value_20 * 50
+        if has_real_mcap and mcap_map.get(row.ticker, 0) > 0:
+            mcap = float(mcap_map[row.ticker])
+        else:
+            avg_value_20 = float(bars["value"].tail(20).mean()) if "value" in bars.columns else 0.0
+            mcap = avg_value_20 * 50
         tickers.append(sg.TickerData(
             ticker=row.ticker, name=row.name, market=row.market,
-            bars=bars, mcap=mcap_proxy, flagged=False,
+            bars=bars, mcap=mcap, flagged=False,
         ))
         rs_rows.append({"ticker": row.ticker, "market": row.market,
                         "rs_mom": ind.rs_momentum(bars["close"].astype(float))})
@@ -135,8 +141,28 @@ with st.sidebar:
         default=["SEARCHING", "FORMING", "CONFIRMED", "BREAKOUT_TODAY", "BREAKOUT_GAP"],
     )
 
+    if "sector" in master.columns:
+        sector_options = sorted(s for s in master["sector"].dropna().unique() if s)
+        sectors = st.multiselect("업종", sector_options, default=sector_options)
+    else:
+        sectors = None
+
+    if "mcap" in master.columns:
+        # 단위: 조원
+        max_mcap_trillion = max(1, int((master["mcap"].max() / 1e12) + 1))
+        mcap_range_trillion = st.slider(
+            "시가총액 범위 (조원)",
+            min_value=0.0, max_value=float(max_mcap_trillion),
+            value=(0.0, float(max_mcap_trillion)), step=0.05,
+        )
+        mcap_min_krw = mcap_range_trillion[0] * 1e12
+        mcap_max_krw = mcap_range_trillion[1] * 1e12
+    else:
+        mcap_min_krw = mcap_max_krw = None
+
     st.divider()
-    top_n = st.number_input("워치리스트 표시 개수", min_value=5, max_value=300, value=30, step=5)
+    top_n = st.number_input("워치리스트 표시 개수", min_value=5, max_value=2000, value=30, step=5,
+                             help="전체 후보 풀까지 표시하려면 큰 값 (예: 2000)")
 
     st.divider()
     if st.button("🔄 시그널 재계산 (캐시 초기화)"):
@@ -169,6 +195,12 @@ if not watchlist_df.empty:
 
 st.divider()
 
+# master에서 sector/mcap을 워치리스트에 join
+if not watchlist_df.empty and {"sector", "mcap"}.issubset(master.columns):
+    watchlist_df = watchlist_df.merge(
+        master[["ticker", "sector", "mcap"]], on="ticker", how="left",
+    )
+
 # ---------- 필터 적용 ----------
 if not watchlist_df.empty:
     flt = watchlist_df.copy()
@@ -177,6 +209,10 @@ if not watchlist_df.empty:
     flt = flt[flt["rs_rank"] >= min_rs]
     if box_states:
         flt = flt[flt["box_state"].isin(box_states)]
+    if sectors is not None and "sector" in flt.columns:
+        flt = flt[flt["sector"].isin(sectors)]
+    if mcap_min_krw is not None and "mcap" in flt.columns:
+        flt = flt[(flt["mcap"] >= mcap_min_krw) & (flt["mcap"] <= mcap_max_krw)]
     flt = flt.sort_values("rs_rank", ascending=False).reset_index(drop=True)
 else:
     flt = watchlist_df
@@ -191,28 +227,39 @@ with left:
         st.info("필터 조건에 맞는 종목이 없습니다.")
         selected_ticker = None
     else:
-        view_cols = ["ticker", "name", "market", "rs_rank", "rs_momentum",
-                     "close", "box_state", "days_in_box", "suggested_stop"]
-        # 미관용: rs_rank 1자리, rs_mom 2자리
-        disp = flt[view_cols].head(top_n).copy()
+        base_cols = ["ticker", "name", "market"]
+        extra_cols = []
+        if "sector" in flt.columns: extra_cols.append("sector")
+        if "mcap" in flt.columns: extra_cols.append("mcap")
+        base_cols.extend(extra_cols)
+        base_cols.extend(["rs_rank", "rs_momentum", "close", "box_state",
+                          "days_in_box", "suggested_stop"])
+        disp = flt[base_cols].head(top_n).copy()
         disp["rs_rank"] = disp["rs_rank"].round(1)
         disp["rs_momentum"] = disp["rs_momentum"].round(2)
+        if "mcap" in disp.columns:
+            disp["mcap_trillion"] = (disp["mcap"] / 1e12).round(3)
+            disp = disp.drop(columns=["mcap"])
 
-        # st.dataframe + 행 클릭
+        # 컬럼 라벨/포맷
+        col_cfg = {
+            "ticker": "종목", "name": "이름", "market": "시장",
+            "rs_rank": st.column_config.NumberColumn("RS", format="%.1f"),
+            "rs_momentum": st.column_config.NumberColumn("rs_mom", format="%+.2f"),
+            "close": st.column_config.NumberColumn("종가", format="%,d"),
+            "box_state": "박스",
+            "days_in_box": st.column_config.NumberColumn("box일", format="%d"),
+            "suggested_stop": st.column_config.NumberColumn("stop hint", format="%,d"),
+        }
+        if "sector" in disp.columns:
+            col_cfg["sector"] = "업종"
+        if "mcap_trillion" in disp.columns:
+            col_cfg["mcap_trillion"] = st.column_config.NumberColumn("시총(조)", format="%.2f")
+
         evt = st.dataframe(
             disp, use_container_width=True, hide_index=True, height=620,
             on_select="rerun", selection_mode="single-row",
-            column_config={
-                "ticker": "종목",
-                "name": "이름",
-                "market": "시장",
-                "rs_rank": st.column_config.NumberColumn("RS", format="%.1f"),
-                "rs_momentum": st.column_config.NumberColumn("rs_mom", format="%+.2f"),
-                "close": st.column_config.NumberColumn("종가", format="%,d"),
-                "box_state": "박스",
-                "days_in_box": st.column_config.NumberColumn("box일", format="%d"),
-                "suggested_stop": st.column_config.NumberColumn("stop hint", format="%,d"),
-            },
+            column_config=col_cfg,
         )
         sel = evt.selection.rows if evt and evt.selection else []
         selected_ticker = disp.iloc[sel[0]]["ticker"] if sel else (disp.iloc[0]["ticker"] if not disp.empty else None)

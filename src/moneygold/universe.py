@@ -25,27 +25,56 @@ _REIT_NAME = re.compile(r"리츠")
 # pykrx의 etf/etn 리스트로 별도 컷.
 
 
-def fetch_master_from_pykrx() -> pd.DataFrame:
-    """KOSPI + KOSDAQ 종목 마스터 + 시장구분.
+def fetch_master_from_pykrx(asof: str | None = None) -> pd.DataFrame:
+    """KOSPI + KOSDAQ 종목 마스터 + 시장구분 + 업종 + 시가총액.
+
+    pykrx.get_market_sector_classifications가 한 번에 sector + mcap을 줌.
+    종목 마스터는 보통 매일 갱신할 필요 없지만, sector·mcap은 시가 기준이라
+    가능하면 가장 최근 영업일 데이터로.
 
     Returns
     -------
-    DataFrame  columns = ['ticker', 'name', 'market']
+    DataFrame  columns = ['ticker', 'name', 'market', 'sector', 'mcap']
+        sector : KRX 표준 업종명 (e.g. '전기·전자', '화학', 'IT 서비스')
+                 일부 종목은 sector 정보 없음 → 'UNKNOWN'
+        mcap   : 시가총액 (KRW)
     """
+    from datetime import datetime
     from pykrx import stock
 
-    rows: list[dict[str, str]] = []
+    biz_date = asof or datetime.now().strftime("%Y%m%d")
+    biz_date = stock.get_nearest_business_day_in_a_week(biz_date)
+
+    rows: list[dict] = []
     for market in ("KOSPI", "KOSDAQ"):
-        tickers = stock.get_market_ticker_list(market=market)
-        for tk in tickers:
-            try:
-                name = stock.get_market_ticker_name(tk)
-            except Exception as e:
-                log.warning("get_market_ticker_name failed for %s: %s", tk, e)
-                name = ""
-            rows.append({"ticker": tk, "name": name, "market": market})
+        try:
+            sec_df = stock.get_market_sector_classifications(biz_date, market)
+        except Exception as e:
+            log.warning("get_market_sector_classifications failed for %s: %s — fallback to ticker_list only", market, e)
+            sec_df = None
+
+        if sec_df is not None and not sec_df.empty:
+            sec_df = sec_df.reset_index().rename(columns={
+                "종목코드": "ticker", "종목명": "name",
+                "업종명": "sector", "시가총액": "mcap",
+            })
+            sec_df["market"] = market
+            sec_df["sector"] = sec_df["sector"].fillna("UNKNOWN").astype(str)
+            sec_df["mcap"] = pd.to_numeric(sec_df["mcap"], errors="coerce").fillna(0).astype("int64")
+            rows.extend(sec_df[["ticker", "name", "market", "sector", "mcap"]].to_dict("records"))
+        else:
+            # fallback: 종목 리스트만
+            tickers = stock.get_market_ticker_list(market=market)
+            for tk in tickers:
+                try:
+                    name = stock.get_market_ticker_name(tk)
+                except Exception:
+                    name = ""
+                rows.append({"ticker": tk, "name": name, "market": market,
+                             "sector": "UNKNOWN", "mcap": 0})
+
     df = pd.DataFrame(rows)
-    log.info("Fetched %d tickers from pykrx (KOSPI+KOSDAQ)", len(df))
+    log.info("Fetched %d tickers from pykrx (KOSPI+KOSDAQ) on %s", len(df), biz_date)
     return df
 
 
