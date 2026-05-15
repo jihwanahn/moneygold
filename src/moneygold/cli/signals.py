@@ -216,11 +216,17 @@ def main(argv: list[str] | None = None) -> int:
     try:
         idx_kospi = _load_index_close(data_dir, "KOSPI200")
         idx_kosdaq = _load_index_close(data_dir, "KOSDAQ150")
+        try:
+            idx_us = _load_index_close(data_dir, "^GSPC")
+        except FileNotFoundError:
+            idx_us = pd.Series(dtype=float)
     except FileNotFoundError as e:
         log.error(str(e))
         return 1
     idx_close_by_market = {"KOSPI": idx_kospi[idx_kospi.index <= asof],
                             "KOSDAQ": idx_kosdaq[idx_kosdaq.index <= asof]}
+    if not idx_us.empty:
+        idx_close_by_market["US"] = idx_us[idx_us.index <= asof]
 
     log.info("Loading bars for %d tickers ...", len(master))
     tickers = _build_ticker_data(master, data_dir, asof, log)

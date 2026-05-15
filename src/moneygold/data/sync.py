@@ -20,6 +20,7 @@ from ..universe import fetch_master_from_pykrx, filter_master
 from . import store
 from .kis_client import KISAPIError, KISClient
 from .. import fundamentals as fund
+from . import yf_client as yfc
 
 log = logging.getLogger(__name__)
 
@@ -185,6 +186,113 @@ class DataSync:
             else:
                 stats["no_change"] += 1
                 log.info("Index %s: no change", code)
+        return stats
+
+    # ----------- US (yfinance) -----------
+
+    def sync_universe_us(self, *, enrich: bool = True) -> pd.DataFrame:
+        """S&P 500 마스터를 master.parquet에 *append* (한국 기존 종목 유지).
+
+        market='US' 컬럼으로 한국과 구분. 같은 ticker 충돌은 가정상 없음
+        (한국 6자리 숫자 vs 미국 알파벳).
+        """
+        from .. import universe_us as uni_us
+        us = uni_us.fetch_master_us(enrich=enrich)
+        path = store.master_path(self.data_dir)
+        existing = store.read_parquet_safe(path)
+        if existing is not None and not existing.empty:
+            kept = existing[existing["market"] != "US"]
+            combined = pd.concat([kept, us], ignore_index=True)
+        else:
+            combined = us
+        # 컬럼 정합성 (kr에 industry 없어도 됨)
+        for c in ["sector", "mcap", "industry"]:
+            if c in combined.columns:
+                combined[c] = combined[c].fillna(0 if c == "mcap" else "UNKNOWN")
+        combined = combined.drop_duplicates(subset=["ticker"], keep="last").reset_index(drop=True)
+        store.write_parquet_atomic(combined, path)
+        log.info("US universe synced: %d tickers (total master rows %d)", len(us), len(combined))
+        return us
+
+    def backfill_bars_us(self, ticker: str, *, period: str = "2y") -> BackfillResult:
+        """yfinance로 일봉 받아서 store/bars/{ticker}.parquet."""
+        try:
+            df = yfc.fetch_daily_bars(ticker, period=period)
+        except Exception as e:
+            return BackfillResult(ticker, 0, 0, 0, error=str(e))
+        if df is None or df.empty:
+            return BackfillResult(ticker, 0, 0, 0)
+        added, skipped = store.append_dedup(
+            store.bars_path(self.data_dir, ticker), df,
+            dedup_keys=["date"], sort_keys=["date"],
+        )
+        return BackfillResult(ticker, added=added, skipped=skipped, fetched=len(df))
+
+    def sync_bars_all_us(
+        self,
+        tickers: list[str],
+        *,
+        period: str = "2y",
+        progress: bool = True,
+    ) -> dict:
+        stats = {"total": len(tickers), "updated": 0, "no_change": 0, "failed": []}
+        it = tqdm(tickers, desc="us bars", unit="tk") if progress else tickers
+        for tk in it:
+            r = self.backfill_bars_us(tk, period=period)
+            if r.error:
+                stats["failed"].append((tk, r.error))
+            elif r.added > 0:
+                stats["updated"] += 1
+            else:
+                stats["no_change"] += 1
+        return stats
+
+    def sync_indices_us(self, codes: list[str] | None = None, *, period: str = "2y") -> dict:
+        codes = codes or ["^GSPC", "^IXIC", "^RUT"]
+        stats = {"total": len(codes), "updated": 0, "no_change": 0, "failed": []}
+        for code in codes:
+            try:
+                df = yfc.fetch_index_bars(code, period=period)
+                if df is None or df.empty:
+                    stats["failed"].append((code, "empty"))
+                    continue
+                added, _ = store.append_dedup(
+                    store.index_path(self.data_dir, code), df,
+                    dedup_keys=["date"], sort_keys=["date"],
+                )
+                if added > 0:
+                    stats["updated"] += 1
+                    log.info("Index %s: +%d rows", code, added)
+                else:
+                    stats["no_change"] += 1
+            except Exception as e:
+                stats["failed"].append((code, str(e)))
+        return stats
+
+    def sync_financials_us(
+        self,
+        tickers: list[str],
+        *,
+        force: bool = False,
+        progress: bool = True,
+    ) -> dict:
+        """yfinance 분기 손익 (이미 단독값이라 정규화 불필요)."""
+        stats = {"total": len(tickers), "updated": 0, "cached": 0, "failed": []}
+        it = tqdm(tickers, desc="us financials", unit="tk") if progress else tickers
+        for tk in it:
+            path = fund.financials_path(self.data_dir, tk)
+            if path.exists() and not force:
+                stats["cached"] += 1
+                continue
+            try:
+                df = yfc.fetch_quarterly_financials(tk)
+                if df is None or df.empty:
+                    stats["failed"].append((tk, "empty"))
+                    continue
+                store.write_parquet_atomic(df, path)
+                stats["updated"] += 1
+            except Exception as e:
+                stats["failed"].append((tk, str(e)))
         return stats
 
     # ----------- Fundamentals (KIS finance 엔드포인트) -----------

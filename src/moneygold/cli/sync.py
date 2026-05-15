@@ -47,6 +47,8 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--indices", action="store_true", help="지수만 sync")
     mode.add_argument("--financials", action="store_true", help="펀더멘털만 sync (KIS finance 분기)")
     mode.add_argument("--consensus", action="store_true", help="컨센서스만 sync (yfinance, 대형주 위주)")
+    mode.add_argument("--us", action="store_true",
+                      help="미국 시스템 전체 sync: S&P 500 마스터 + 일봉 + 지수 + 분기재무 + 컨센서스")
 
     parser.add_argument("--tickers", help="특정 종목만. 콤마 구분. 예: 005930,000660")
     parser.add_argument("--limit", type=int, help="첫 N개 종목만 (디버그)")
@@ -64,11 +66,50 @@ def main(argv: list[str] | None = None) -> int:
     log = logging.getLogger("moneygold.cli.sync")
 
     # 모드 디폴트
-    if not (args.universe or args.backfill or args.daily or args.indices or args.financials or args.consensus):
+    if not (args.universe or args.backfill or args.daily or args.indices or args.financials or args.consensus or args.us):
         args.daily = True
 
     kis = KISClient(cfg.kis)
     sync = DataSync(kis, Path(cfg.data_dir))
+
+    # 미국 시스템 전체 sync (yfinance 단독)
+    if args.us:
+        from .. import consensus as cons_mod
+        log.info("== US sync: 마스터 ==")
+        us_master = sync.sync_universe_us()
+        tickers = us_master["ticker"].tolist()
+        if args.limit:
+            tickers = tickers[: args.limit]
+
+        log.info("== US sync: 지수 (^GSPC, ^IXIC, ^RUT) ==")
+        idx_stats = sync.sync_indices_us()
+        log.info("Indices: %s", idx_stats)
+
+        log.info("== US sync: 일봉 (%d 종목) ==", len(tickers))
+        bars_stats = sync.sync_bars_all_us(tickers)
+        log.info("Bars: total=%d updated=%d no_change=%d failed=%d",
+                 bars_stats["total"], bars_stats["updated"],
+                 bars_stats["no_change"], len(bars_stats["failed"]))
+
+        log.info("== US sync: 분기 재무 ==")
+        fin_stats = sync.sync_financials_us(tickers, force=args.force_financials)
+        log.info("Financials: total=%d updated=%d cached=%d failed=%d",
+                 fin_stats["total"], fin_stats["updated"],
+                 fin_stats["cached"], len(fin_stats["failed"]))
+
+        log.info("== US sync: 컨센서스 ==")
+        # consensus는 yfinance라 _yf_symbol에서 .KS/.KQ 추가하면 안 됨 — US는 그대로
+        # 임시 우회: market='US'를 빈 suffix로 처리하는 별도 호출 필요
+        # 일단 yf_symbol을 활용하기 위해 US 종목들도 동일 함수 호출
+        # consensus._yf_symbol("AAPL", "US") → "AAPL." → 잘못됨
+        # → consensus.fetch_consensus는 한국 .KS/.KQ 가정. US용 wrapper 필요.
+        # 임시: ticker 그대로 fetch + 캐싱
+        rows = [(t, "US") for t in tickers]
+        cons_stats = cons_mod.sync_consensus_for(
+            Path(cfg.data_dir), rows, force=args.force_consensus,
+        )
+        log.info("Consensus: %s", cons_stats)
+        return 0
 
     # 컨센서스만 (KIS 무관, yfinance만)
     if args.consensus:

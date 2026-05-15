@@ -68,11 +68,13 @@ def _run_signals(_data_dir_str: str, asof: str) -> dict:
 
     idx_kospi = _load_index_close(_data_dir_str, "KOSPI200")
     idx_kosdaq = _load_index_close(_data_dir_str, "KOSDAQ150")
-    if idx_kospi.empty or idx_kosdaq.empty:
+    idx_us = _load_index_close(_data_dir_str, "^GSPC")
+    if idx_kospi.empty and idx_kosdaq.empty and idx_us.empty:
         return {}
-    idx_kospi = idx_kospi[idx_kospi.index <= asof]
-    idx_kosdaq = idx_kosdaq[idx_kosdaq.index <= asof]
-    indices = {"KOSPI": idx_kospi, "KOSDAQ": idx_kosdaq}
+    indices = {}
+    if not idx_kospi.empty: indices["KOSPI"] = idx_kospi[idx_kospi.index <= asof]
+    if not idx_kosdaq.empty: indices["KOSDAQ"] = idx_kosdaq[idx_kosdaq.index <= asof]
+    if not idx_us.empty: indices["US"] = idx_us[idx_us.index <= asof]
 
     has_real_mcap = "mcap" in master.columns
     mcap_map = dict(zip(master["ticker"], master["mcap"])) if has_real_mcap else {}

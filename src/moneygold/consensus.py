@@ -60,7 +60,13 @@ class ConsensusResult:
 
 
 def _yf_symbol(ticker: str, market: str) -> str:
-    """Yahoo Finance 한국 종목 접미: KOSPI → .KS, KOSDAQ → .KQ."""
+    """Yahoo Finance 종목 코드:
+    - KOSPI → {ticker}.KS
+    - KOSDAQ → {ticker}.KQ
+    - US → ticker 그대로 (예: AAPL, BRK-B)
+    """
+    if market == "US":
+        return ticker
     return f"{ticker}.{'KS' if market == 'KOSPI' else 'KQ'}"
 
 

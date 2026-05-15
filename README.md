@@ -29,6 +29,22 @@ bash scripts/daily.sh     # 일봉 + 시그널 JSON export (~10분)
 # 또는 Windows: scripts\daily.bat
 ```
 
+### 🇺🇸 미국 주식 추가 (선택)
+
+S&P 500 ~503 종목을 한국 시스템과 같은 대시보드에서 운영.
+yfinance 단독으로 시세·재무·컨센서스 모두 받음 (별도 API 키 불필요).
+
+```bash
+python -m moneygold.cli.sync --us       # 전 단계 일괄 (~30분)
+# 또는 --us --limit 50 로 일부만 빠르게
+```
+
+`store/meta/master.parquet`에 `market='US'` 행이 추가되며, 대시보드 사이드바 "시장" 필터에 자동으로 **US** 옵션이 노출됩니다. 같은 화면에서 KOSPI/KOSDAQ과 함께 비교 가능.
+
+> RS 분모는 S&P 500 (`^GSPC`). Stage·Template·Darvas는 한국과 *동일한* 로직 — 같은 8조건, 같은 박스, 같은 4단계.
+
+
+
 cron 등록 예 (영업일 17:00):
 ```cron
 0 17 * * 1-5  cd /path/to/moneygold && bash scripts/daily.sh >> store/logs/daily.log 2>&1
