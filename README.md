@@ -22,7 +22,7 @@ KOSPI/KOSDAQ 스윙 트레이딩 시그널 생성기. Weinstein Stage Analysis +
 # 1) 가상환경 + 의존성 (conda 권장)
 conda create -n moneygold python=3.11 -y
 conda activate moneygold
-pip install -e ".[dev]"
+pip install -e ".[dev,ui]"   # ui = streamlit + plotly
 
 # 2) 환경변수
 cp .env.example .env
@@ -46,6 +46,22 @@ python scripts/verify_kis.py
 
 **MCP (korea-stock-analyzer)**
 - 이미 Claude Code MCP로 연결되어 있어 별도 키 필요 없음
+
+## 대시보드 (Streamlit)
+
+```bash
+# 데이터가 이미 sync 돼 있다고 가정
+streamlit run src/moneygold/app/streamlit_app.py
+```
+
+브라우저에 자동으로 열림 (보통 http://localhost:8501).
+
+- **사이드바**: 기준일, 시장, RS rank 최소, 박스 상태 필터, 표시 개수
+- **상단 카드**: 후보 풀 수, 박스 돌파 수, RS rank 평균/rs_mom 최대
+- **좌측 워치리스트**: Stage 2 + Template 통과 종목 (정렬·검색·행 선택 가능)
+- **우측 차트**: 선택 종목의 캔들 + SMA50/150/200 + Darvas 박스 + Stage 배경색
+- **8조건 패널**: 미네비니 Template 통과/실패 항목별
+- **하단**: 오늘 박스 돌파 종목 표 + RS rank 분포 히스토그램
 
 ## 라이선스 / 면책
 
