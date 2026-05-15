@@ -101,11 +101,14 @@ def _build_ticker_data(
     return out
 
 
-def _compute_rs_rank_map(
+def _compute_rs_maps(
     tickers: list[sg.TickerData],
     sma_window_for_min_data: int = 252,
-) -> dict[str, float]:
-    """모든 종목의 rs_momentum 계산 후 시장별 횡단면 백분위."""
+) -> tuple[dict[str, float], dict[str, float]]:
+    """모든 종목의 rs_momentum 계산 + 시장별 횡단면 백분위.
+
+    Returns (rs_rank_map, rs_momentum_map).
+    """
     rows = []
     for td in tickers:
         bars = td.bars
@@ -116,12 +119,14 @@ def _compute_rs_rank_map(
         rows.append({"ticker": td.ticker, "market": td.market, "rs_momentum": rs_mom})
 
     if not rows:
-        return {}
+        return {}, {}
     df = pd.DataFrame(rows)
     df["rs_rank"] = float("nan")
     for market, group in df.groupby("market"):
         df.loc[group.index, "rs_rank"] = ind.rs_rank(group["rs_momentum"]).values
-    return dict(zip(df["ticker"], df["rs_rank"]))
+    rank_map = dict(zip(df["ticker"], df["rs_rank"]))
+    mom_map = dict(zip(df["ticker"], df["rs_momentum"]))
+    return rank_map, mom_map
 
 
 def _print_report(sigs: sg.DailySignals, master: pd.DataFrame, watchlist_top: int = 30) -> None:
@@ -146,15 +151,16 @@ def _print_report(sigs: sg.DailySignals, master: pd.DataFrame, watchlist_top: in
     if sigs.watchlist:
         shown = sigs.watchlist[:watchlist_top]
         print(f"[BUY 후보 풀 — Stage 2 + Template 통과, RS desc TOP {len(shown)}/{len(sigs.watchlist)}]")
-        print(f"  {'ticker':>7} {'name':>12} {'mkt':>6} {'RS':>5} {'close':>10} {'box':>12} "
-              f"{'box top':>10} {'box bot':>10} {'days':>5} {'stop hint':>10}")
+        print(f"  {'ticker':>7} {'name':>12} {'mkt':>6} {'RS':>6} {'rs_mom':>7} "
+              f"{'close':>10} {'box':>12} {'box top':>10} {'box bot':>10} {'days':>5} {'stop hint':>10}")
         for w in shown:
             box_top_str = f"{w.box_top:,.0f}" if w.box_top is not None else "-"
             box_bot_str = f"{w.box_bottom:,.0f}" if w.box_bottom is not None else "-"
             marker = "⭐" if w.box_state.startswith("BREAKOUT") else (
                 "•" if w.box_state == "CONFIRMED" else " "
             )
-            print(f"  {w.ticker:>7} {w.name[:12]:>12} {w.market:>6} {w.rs_rank:>5.0f} "
+            mom_str = f"{w.rs_momentum:>+6.2f}" if not pd.isna(w.rs_momentum) else "    -"
+            print(f"  {w.ticker:>7} {w.name[:12]:>12} {w.market:>6} {w.rs_rank:>6.1f} {mom_str:>7} "
                   f"{w.close:>10,.0f} {marker} {w.box_state[:10]:>10} "
                   f"{box_top_str:>10} {box_bot_str:>10} {w.days_in_box:>5} {w.suggested_stop:>10,.0f}")
         print()
@@ -215,7 +221,7 @@ def main(argv: list[str] | None = None) -> int:
     log.info("Loaded %d / %d tickers", len(tickers), len(master))
 
     log.info("Computing RS rank ...")
-    rs_rank_map = _compute_rs_rank_map(tickers)
+    rs_rank_map, rs_momentum_map = _compute_rs_maps(tickers)
     log.info("RS rank computed for %d tickers", len(rs_rank_map))
 
     portfolio_path = data_dir / "portfolio.json"
@@ -224,7 +230,10 @@ def main(argv: list[str] | None = None) -> int:
         log.info("Portfolio loaded: %d positions", len(portfolio))
 
     log.info("Generating signals as of %s ...", asof)
-    sigs = sg.generate_signals(asof, tickers, portfolio, rs_rank_map, idx_close_by_market, cfg)
+    sigs = sg.generate_signals(
+        asof, tickers, portfolio, rs_rank_map, idx_close_by_market, cfg,
+        rs_momentum_map=rs_momentum_map,
+    )
 
     _print_report(sigs, master, watchlist_top=args.top)
 

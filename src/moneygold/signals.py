@@ -109,7 +109,8 @@ class WatchlistEntry:
     name: str
     market: str
     close: float
-    rs_rank: float
+    rs_rank: float           # IBD 횡단면 백분위 0~100 (시장별)
+    rs_momentum: float       # IBD 4Q 가중 수익률 절대값 (참고용)
     box_state: str           # SEARCHING / FORMING / CONFIRMED / BREAKOUT_TODAY / BREAKOUT_GAP
     box_top: float | None
     box_bottom: float | None
@@ -138,6 +139,7 @@ def generate_signals(
     rs_rank_map: dict[str, float],
     idx_close_by_market: dict[str, pd.Series],
     cfg: AppConfig,
+    rs_momentum_map: dict[str, float] | None = None,
 ) -> DailySignals:
     """일일 시그널 생성.
 
@@ -226,9 +228,10 @@ def generate_signals(
         box_for_watch = darvas.current_box(bars, box_params)
         last_close = float(bars["close"].iloc[-1])
         suggested_stop = float(box_for_watch.bottom) if box_for_watch.bottom is not None else last_close * 0.93
+        rs_mom_value = float(rs_momentum_map.get(td.ticker, float("nan"))) if rs_momentum_map else float("nan")
         watchlist.append(WatchlistEntry(
             ticker=td.ticker, name=td.name, market=td.market,
-            close=last_close, rs_rank=rs_rank_value,
+            close=last_close, rs_rank=rs_rank_value, rs_momentum=rs_mom_value,
             box_state=str(box_for_watch.state),
             box_top=float(box_for_watch.top) if box_for_watch.top is not None else None,
             box_bottom=float(box_for_watch.bottom) if box_for_watch.bottom is not None else None,
