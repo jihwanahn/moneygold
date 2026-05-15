@@ -80,6 +80,25 @@ def fetch_index_bars(symbol: str = "^GSPC", period: str = "2y") -> pd.DataFrame:
     return out
 
 
+# yfinance 분기 손익 row name 별칭 (ABBV 등 일부 종목이 비표준 이름 사용)
+_REVENUE_ALIASES = ["Total Revenue", "Revenue", "Operating Revenue", "Total Revenues"]
+_OP_INCOME_ALIASES = [
+    "Operating Income",
+    "Operating Income or Loss",
+    "Total Operating Income As Reported",
+    "Operating Income From Continuing Operations",
+]
+_NET_INCOME_ALIASES = [
+    "Net Income",
+    "Net Income Common Stockholders",
+    "Net Income Continuous Operations",
+    "Net Income From Continuing Operation Net Minority Interest",
+    "Net Income Including Noncontrolling Interests",
+]
+_DILUTED_EPS_ALIASES = ["Diluted EPS", "Diluted EPS Continuing Operations"]
+_BASIC_EPS_ALIASES = ["Basic EPS", "Basic EPS Continuing Operations"]
+
+
 def fetch_quarterly_financials(ticker: str) -> pd.DataFrame:
     """분기 손익 (Quarterly Income Statement). yfinance가 *분기 단독값* 반환.
 
@@ -103,20 +122,22 @@ def fetch_quarterly_financials(ticker: str) -> pd.DataFrame:
     for col in sorted(q.columns):
         y = col.year
         qn = (col.month - 1) // 3 + 1
-        def _v(name: str) -> float:
-            if name not in q.index:
-                return float("nan")
-            v = q.loc[name, col]
-            try:
-                return float(v) if pd.notna(v) else float("nan")
-            except Exception:
-                return float("nan")
-        revenue = _v("Total Revenue")
-        op_income = _v("Operating Income")
-        net_income = _v("Net Income")
-        eps = _v("Diluted EPS")
+        def _v_any(names: list[str]) -> float:
+            for name in names:
+                if name in q.index:
+                    v = q.loc[name, col]
+                    try:
+                        if pd.notna(v):
+                            return float(v)
+                    except Exception:
+                        continue
+            return float("nan")
+        revenue = _v_any(_REVENUE_ALIASES)
+        op_income = _v_any(_OP_INCOME_ALIASES)
+        net_income = _v_any(_NET_INCOME_ALIASES)
+        eps = _v_any(_DILUTED_EPS_ALIASES)
         if pd.isna(eps):
-            eps = _v("Basic EPS")
+            eps = _v_any(_BASIC_EPS_ALIASES)
         op_margin = (op_income / revenue * 100.0) if (revenue and revenue != 0 and pd.notna(op_income)) else float("nan")
         rows.append({
             "quarter": f"{y}Q{qn}",
