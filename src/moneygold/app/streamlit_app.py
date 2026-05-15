@@ -25,6 +25,7 @@ from moneygold import indicators as ind  # noqa: E402
 from moneygold import signals as sg  # noqa: E402
 from moneygold import stage as stg  # noqa: E402
 from moneygold import template as tmpl  # noqa: E402
+from moneygold.app import _glossary as g  # noqa: E402
 from moneygold.app.charts import build_detail_chart, build_rs_distribution  # noqa: E402
 from moneygold.config import load_config  # noqa: E402
 from moneygold.data import store  # noqa: E402
@@ -126,24 +127,28 @@ with st.sidebar:
 
     # asof
     latest_master_date = datetime.now().strftime("%Y%m%d")
-    asof_str = st.text_input("기준일 (YYYYMMDD)", value=latest_master_date, max_chars=8)
+    asof_str = st.text_input("기준일 (YYYYMMDD)", value=latest_master_date, max_chars=8,
+                              help=g.TOOLTIP_ASOF)
 
     st.divider()
     markets = st.multiselect(
         "시장",
         sorted(master["market"].unique()),
         default=sorted(master["market"].unique()),
+        help=g.TOOLTIP_MARKET,
     )
-    min_rs = st.slider("RS rank 최소", 0, 100, 70, step=1)
+    min_rs = st.slider("RS rank 최소", 0, 100, 70, step=1, help=g.TOOLTIP_RS_MIN)
     box_states = st.multiselect(
         "박스 상태",
         ["SEARCHING", "FORMING", "CONFIRMED", "BREAKOUT_TODAY", "BREAKOUT_GAP"],
         default=["SEARCHING", "FORMING", "CONFIRMED", "BREAKOUT_TODAY", "BREAKOUT_GAP"],
+        help=g.TOOLTIP_BOX_STATES,
     )
 
     if "sector" in master.columns:
         sector_options = sorted(s for s in master["sector"].dropna().unique() if s)
-        sectors = st.multiselect("업종", sector_options, default=sector_options)
+        sectors = st.multiselect("업종", sector_options, default=sector_options,
+                                  help=g.TOOLTIP_SECTOR)
     else:
         sectors = None
 
@@ -154,6 +159,7 @@ with st.sidebar:
             "시가총액 범위 (조원)",
             min_value=0.0, max_value=float(max_mcap_trillion),
             value=(0.0, float(max_mcap_trillion)), step=0.05,
+            help=g.TOOLTIP_MCAP,
         )
         mcap_min_krw = mcap_range_trillion[0] * 1e12
         mcap_max_krw = mcap_range_trillion[1] * 1e12
@@ -162,7 +168,7 @@ with st.sidebar:
 
     st.divider()
     top_n = st.number_input("워치리스트 표시 개수", min_value=5, max_value=2000, value=30, step=5,
-                             help="전체 후보 풀까지 표시하려면 큰 값 (예: 2000)")
+                             help=g.TOOLTIP_TOP_N)
 
     st.divider()
     if st.button("🔄 시그널 재계산 (캐시 초기화)"):
@@ -186,12 +192,33 @@ st.caption(
     f"asof **{asof_str}** · Weinstein Stage 2 + Minervini Trend Template 8/8 + Darvas Box"
 )
 
+with st.expander("❓ 이 대시보드 사용법 (처음 사용자 필독)", expanded=False):
+    st.markdown(g.INTRO_HELP)
+    st.markdown("---")
+    st.markdown(g.CHART_LEGEND)
+    st.markdown("---")
+    st.markdown("**Weinstein 4단계 자세히**:")
+    for code, (label, desc, color) in g.STAGE_DESC.items():
+        st.markdown(f"- **Stage {code} {label}** ({color}) — {desc}")
+
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("후보 풀 (Stage2 + Template)", len(watchlist_df))
-c2.metric("⭐ 박스 돌파", len(new_buys_df))
+c1.metric(
+    "후보 풀 (Stage2 + Template)", len(watchlist_df),
+    help="Weinstein Stage 2 + Minervini 8조건 *모두* 통과한 종목 수.",
+)
+c2.metric(
+    "⭐ 박스 돌파", len(new_buys_df),
+    help="후보 풀 중 오늘 Darvas 박스 천장을 거래량 동반 돌파한 종목 수 (즉시 검토 대상).",
+)
 if not watchlist_df.empty:
-    c3.metric("RS rank 평균", f"{watchlist_df['rs_rank'].mean():.1f}")
-    c4.metric("rs_mom 최대", f"{watchlist_df['rs_momentum'].max():+.2f}")
+    c3.metric(
+        "RS rank 평균", f"{watchlist_df['rs_rank'].mean():.1f}",
+        help="워치리스트 종목들의 RS rank 평균 (Template 조건 8에서 이미 70+ 필터됨).",
+    )
+    c4.metric(
+        "rs_mom 최대", f"{watchlist_df['rs_momentum'].max():+.2f}",
+        help="가장 강한 모멘텀 종목의 가중 평균 수익률. +5.0 = 가중 500%.",
+    )
 
 st.divider()
 
@@ -241,20 +268,22 @@ with left:
             disp["mcap_trillion"] = (disp["mcap"] / 1e12).round(3)
             disp = disp.drop(columns=["mcap"])
 
-        # 컬럼 라벨/포맷
+        # 컬럼 라벨/포맷 + 툴팁
         col_cfg = {
-            "ticker": "종목", "name": "이름", "market": "시장",
-            "rs_rank": st.column_config.NumberColumn("RS", format="%.1f"),
-            "rs_momentum": st.column_config.NumberColumn("rs_mom", format="%+.2f"),
-            "close": st.column_config.NumberColumn("종가", format="%,d"),
-            "box_state": "박스",
-            "days_in_box": st.column_config.NumberColumn("box일", format="%d"),
-            "suggested_stop": st.column_config.NumberColumn("stop hint", format="%,d"),
+            "ticker": st.column_config.TextColumn("종목", help=g.COL_TICKER),
+            "name": st.column_config.TextColumn("이름", help=g.COL_NAME),
+            "market": st.column_config.TextColumn("시장", help=g.COL_MARKET),
+            "rs_rank": st.column_config.NumberColumn("RS", format="%.1f", help=g.COL_RS_RANK),
+            "rs_momentum": st.column_config.NumberColumn("rs_mom", format="%+.2f", help=g.COL_RS_MOMENTUM),
+            "close": st.column_config.NumberColumn("종가", format="%,d", help=g.COL_CLOSE),
+            "box_state": st.column_config.TextColumn("박스", help=g.COL_BOX_STATE),
+            "days_in_box": st.column_config.NumberColumn("box일", format="%d", help=g.COL_DAYS_IN_BOX),
+            "suggested_stop": st.column_config.NumberColumn("stop hint", format="%,d", help=g.COL_SUGGESTED_STOP),
         }
         if "sector" in disp.columns:
-            col_cfg["sector"] = "업종"
+            col_cfg["sector"] = st.column_config.TextColumn("업종", help=g.COL_SECTOR)
         if "mcap_trillion" in disp.columns:
-            col_cfg["mcap_trillion"] = st.column_config.NumberColumn("시총(조)", format="%.2f")
+            col_cfg["mcap_trillion"] = st.column_config.NumberColumn("시총(조)", format="%.2f", help=g.COL_MCAP_TRILLION)
 
         evt = st.dataframe(
             disp, use_container_width=True, hide_index=True, height=620,
@@ -293,8 +322,11 @@ with right:
                 breakout_volume_mult=cfg.strategy.breakout_volume_mult,
             )
 
-            tail = st.slider("차트 기간 (영업일)", min_value=60, max_value=486, value=252, step=10,
-                             key=f"tail_{selected_ticker}")
+            tail = st.slider(
+                "차트 기간 (영업일)", min_value=60, max_value=486, value=252, step=10,
+                key=f"tail_{selected_ticker}",
+                help="60 = 약 3개월, 252 = 1년, 486 = 2년 (백필 한도). 추세 길게 보려면 큰 값.",
+            )
             fig = build_detail_chart(
                 bars, name=f"{selected_ticker} {sel_name}",
                 tail=tail, stage_params=stage_params, box_params=box_params,
@@ -305,8 +337,11 @@ with right:
             wl_row = flt[flt["ticker"] == selected_ticker]
             if not wl_row.empty:
                 wl = wl_row.iloc[0]
-                with st.expander("미네비니 8조건 + 진단 (재계산)", expanded=True):
-                    idx_code = "KOSPI200" if sel_market == "KOSPI" else "KOSDAQ150"
+                with st.expander("미네비니 8조건 + 진단 (마우스 오버로 의미 확인)", expanded=True):
+                    st.caption(
+                        "Mark Minervini의 *Trade Like a Stock Market Wizard*에서 추출한 "
+                        "Trend Template. 8개 모두 통과한 종목만 BUY 후보로 인정."
+                    )
                     rs_v = float(wl["rs_rank"])
                     t = tmpl.check_template(
                         bars["close"].astype(float), rs_v,
@@ -315,24 +350,27 @@ with right:
                         high_series=bars["high"].astype(float) if "high" in bars.columns else None,
                         low_series=bars["low"].astype(float) if "low" in bars.columns else None,
                     )
-                    cond_labels = [
-                        "1. close > sma150 & sma200",
-                        "2. sma150 > sma200",
-                        "3. sma200 > sma200[22] (1개월 우상향)",
-                        "4. sma50 > sma150, sma200",
-                        "5. close > sma50",
-                        "6. close >= low_52w × 1.25 (저가)",
-                        "7. close >= high_52w × 0.75 (고가)",
-                        f"8. RS rank ≥ {cfg.strategy.rs_rank_min}",
+                    rows = [
+                        {"조건": title, "의미": desc, "통과": "✅" if c else "❌"}
+                        for (title, _ko, desc), c in zip(g.MINERVINI_CONDITIONS, t.checks)
                     ]
-                    rows = [{"조건": lbl, "통과": "✅" if c else "❌"}
-                            for lbl, c in zip(cond_labels, t.checks)]
-                    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+                    st.dataframe(
+                        pd.DataFrame(rows), use_container_width=True, hide_index=True,
+                        column_config={
+                            "조건": st.column_config.TextColumn("조건", width="medium"),
+                            "의미": st.column_config.TextColumn("의미 (한 줄)", width="large"),
+                            "통과": st.column_config.TextColumn("통과", width="small"),
+                        },
+                    )
 
-                    st.write(
-                        f"**진입 가이드**: close `{wl['close']:,.0f}` · "
-                        f"stop hint `{wl['suggested_stop']:,.0f}` · "
-                        f"box `{wl['box_state']}` (top {wl['box_top']} / bottom {wl['box_bottom']})"
+                    st.markdown(
+                        f"**진입 가이드** — 종가 `{wl['close']:,.0f}` · "
+                        f"권장 손절 `{wl['suggested_stop']:,.0f}` · "
+                        f"박스 `{wl['box_state']}` (top {wl['box_top']} / bottom {wl['box_bottom']})"
+                    )
+                    st.caption(
+                        "💡 권장 손절은 박스 바닥 또는 종가 -7% 중 하나. "
+                        "실제 진입가·손절가는 차트 보고 본인이 결정."
                     )
         else:
             st.warning("선택한 종목의 bars 데이터를 찾을 수 없습니다.")
@@ -345,6 +383,7 @@ b1, b2 = st.columns([0.5, 0.5])
 
 with b1:
     st.subheader("⭐ 오늘 박스 돌파")
+    st.caption("Darvas 박스 천장 + 0.3% 위로 종가 돌파. 즉시 검토 대상.")
     if new_buys_df.empty:
         st.info("오늘 박스 돌파 종목 없음")
     else:
@@ -353,10 +392,30 @@ with b1:
                                 "volume_ratio", "is_gap_breakout"]].copy()
         nb_disp["rs_rank"] = nb_disp["rs_rank"].round(1)
         nb_disp["volume_ratio"] = nb_disp["volume_ratio"].round(2)
-        st.dataframe(nb_disp, use_container_width=True, hide_index=True)
+        st.dataframe(
+            nb_disp, use_container_width=True, hide_index=True,
+            column_config={
+                "ticker": st.column_config.TextColumn("종목", help=g.COL_TICKER),
+                "name": st.column_config.TextColumn("이름"),
+                "market": st.column_config.TextColumn("시장"),
+                "rs_rank": st.column_config.NumberColumn("RS", format="%.1f", help=g.COL_RS_RANK),
+                "entry_guide": st.column_config.NumberColumn("진입가", format="%,d",
+                                                              help="박스 천장 × 1.003 (참고)"),
+                "stop": st.column_config.NumberColumn("손절", format="%,d",
+                                                       help="박스 바닥 — 이 아래로 종가 마감 시 청산"),
+                "box_top": st.column_config.NumberColumn("box top", format="%,d"),
+                "box_bottom": st.column_config.NumberColumn("box bot", format="%,d"),
+                "days_in_box": st.column_config.NumberColumn("box일", format="%d",
+                                                              help=g.COL_DAYS_IN_BOX),
+                "volume_ratio": st.column_config.NumberColumn("vol×", format="%.2f",
+                                                               help=g.COL_VOLUME_RATIO),
+                "is_gap_breakout": st.column_config.CheckboxColumn("gap", help=g.COL_IS_GAP),
+            },
+        )
 
 with b2:
     st.subheader("RS rank 분포 (워치리스트)")
+    st.caption("같은 시장(KOSPI 또는 KOSDAQ) 내 종목들의 상대 강도 백분위 0~100.")
     if not watchlist_df.empty:
         st.plotly_chart(
             build_rs_distribution(watchlist_df["rs_rank"]),
