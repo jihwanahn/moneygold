@@ -150,12 +150,11 @@ def fetch_quarterly_financials(ticker: str) -> pd.DataFrame:
         })
     df = pd.DataFrame(rows).sort_values(["year", "q"]).reset_index(drop=True)
 
-    # YoY 계산 (4분기 전 = 같은 분기 작년)
-    import numpy as np
-    for src, dst in [("revenue", "revenue_yoy"), ("op_income", "op_income_yoy"), ("eps", "eps_yoy")]:
-        prev = df[src].shift(4)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            df[dst] = (df[src] / prev.replace(0, np.nan) - 1.0) * 100.0
+    # YoY: (year-1, same q) 매칭 — yfinance도 일부 종목 분기 누락 있음
+    from ..fundamentals import _attach_yoy_by_year_q
+    _attach_yoy_by_year_q(df, [("revenue", "revenue_yoy"),
+                                ("op_income", "op_income_yoy"),
+                                ("eps", "eps_yoy")])
     return df
 
 

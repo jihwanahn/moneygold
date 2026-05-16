@@ -88,6 +88,42 @@ def _periodize_cumulative(
 
 
 # ============================================================
+# YoY by (year-1, same q) — positional shift(4) breaks when quarters are missing
+# ============================================================
+
+def _attach_yoy_by_year_q(
+    df: pd.DataFrame,
+    pairs: list[tuple[str, str]],
+) -> None:
+    """Compute YoY in-place by joining each row to the (year-1, same q) row.
+
+    df must contain integer 'year' and 'q' columns. Each (src, dst) pair
+    overwrites df[dst] with (df[src] / prev_year_same_q[src] - 1) * 100.
+    Rows without a matching prior-year quarter get NaN. Prior=0 → NaN.
+    """
+    if "year" not in df.columns or "q" not in df.columns:
+        for _, dst in pairs:
+            df[dst] = np.nan
+        return
+    prev_year = df["year"] - 1
+    key_cur = list(zip(df["year"].astype(int), df["q"].astype(int)))
+    idx_by_key = {(int(y), int(q)): i for i, (y, q) in enumerate(zip(df["year"], df["q"]))}
+    for src, dst in pairs:
+        if src not in df.columns:
+            df[dst] = np.nan
+            continue
+        cur = pd.to_numeric(df[src], errors="coerce").values
+        prev = np.full(len(df), np.nan)
+        for i, (py, q) in enumerate(zip(prev_year.astype(int), df["q"].astype(int))):
+            j = idx_by_key.get((int(py), int(q)))
+            if j is not None:
+                prev[i] = cur[j]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            yoy = (cur / np.where(prev == 0, np.nan, prev) - 1.0) * 100.0
+        df[dst] = yoy
+
+
+# ============================================================
 # Build quarterly metrics for one ticker
 # ============================================================
 
@@ -152,16 +188,11 @@ def build_fundamentals(
         if "eps" in merged.columns:
             out["eps"] = pd.to_numeric(merged["eps"], errors="coerce").values
 
-    # YoY 계산: 같은 분기 작년 대비
+    # YoY 계산: (year-1, same q) 매칭. shift(4)는 분기 누락 시 엉뚱한 행과 비교됨.
     out = out.sort_values(["year", "q"]).reset_index(drop=True)
-    for src, dst in [("revenue", "revenue_yoy"), ("op_income", "op_income_yoy"), ("eps", "eps_yoy")]:
-        if src not in out.columns:
-            out[dst] = np.nan
-            continue
-        prev = out[src].shift(4)   # 4분기 전 = 같은 분기 작년
-        with np.errstate(divide="ignore", invalid="ignore"):
-            yoy = (out[src] / prev.replace(0, np.nan) - 1.0) * 100.0
-        out[dst] = yoy
+    _attach_yoy_by_year_q(out, [("revenue", "revenue_yoy"),
+                                 ("op_income", "op_income_yoy"),
+                                 ("eps", "eps_yoy")])
 
     # 연속 성장 분기 수 + 가속
     last = out.iloc[-1] if not out.empty else None
@@ -248,9 +279,17 @@ def fetch_and_cache(
 
 
 def build_fundamentals_from_cache(df: pd.DataFrame) -> FundamentalsResult:
-    """캐시된 quarters DF에서 latest 지표 + 연속 성장 분기 재계산."""
+    """캐시된 quarters DF에서 latest 지표 + 연속 성장 분기 재계산.
+
+    분기 누락 종목의 잘못된 YoY (shift(4) 버그)를 캐시 읽을 때 (year, q) 매칭으로
+    재계산해 덮어쓴다 — 기존 parquet은 재 sync 없이도 자동 보정됨.
+    """
     if df.empty:
         return FundamentalsResult(quarters=df)
+    df = df.sort_values(["year", "q"]).reset_index(drop=True) if {"year","q"}.issubset(df.columns) else df
+    _attach_yoy_by_year_q(df, [("revenue", "revenue_yoy"),
+                                ("op_income", "op_income_yoy"),
+                                ("eps", "eps_yoy")])
     last = df.iloc[-1]
     growth_q = 0
     op_growth_q = 0
