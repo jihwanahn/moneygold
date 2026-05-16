@@ -341,7 +341,6 @@ with left:
         selected_ticker = None
     else:
         base_cols = ["ticker", "name", "market"]
-        if "sector" in flt.columns: base_cols.append("sector")
         if "mcap" in flt.columns: base_cols.append("mcap")
         base_cols.extend(["rs_rank", "rs_momentum", "close", "box_state",
                           "days_in_box", "suggested_stop"])
@@ -380,8 +379,6 @@ with left:
             "days_in_box": st.column_config.NumberColumn("box일", format="%d", help=g.COL_DAYS_IN_BOX),
             "suggested_stop": st.column_config.NumberColumn("stop hint", format="%,d", help=g.COL_SUGGESTED_STOP),
         }
-        if "sector" in disp.columns:
-            col_cfg["sector"] = st.column_config.TextColumn("업종", help=g.COL_SECTOR)
         if "mcap_trillion" in disp.columns:
             col_cfg["mcap_trillion"] = st.column_config.NumberColumn("시총(조)", format="%.2f", help=g.COL_MCAP_TRILLION)
         # 펀더멘털
