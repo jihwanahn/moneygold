@@ -98,7 +98,13 @@ def _attach_yoy_by_year_q(
     """Compute YoY in-place by joining each row to the (year-1, same q) row.
 
     df must contain integer 'year' and 'q' columns. Each (src, dst) pair
-    overwrites df[dst] with (df[src] / prev_year_same_q[src] - 1) * 100.
+    overwrites df[dst] with (cur - prev) / abs(prev) * 100.
+
+    Uses abs(prev) as the denominator (not prev itself) so the sign is
+    preserved when the prior period is negative — e.g., turnaround from
+    loss to profit reads as positive growth, not a fake -10000% decline.
+    Standard finance convention for negative-base YoY.
+
     Rows without a matching prior-year quarter get NaN. Prior=0 → NaN.
     """
     if "year" not in df.columns or "q" not in df.columns:
@@ -106,7 +112,6 @@ def _attach_yoy_by_year_q(
             df[dst] = np.nan
         return
     prev_year = df["year"] - 1
-    key_cur = list(zip(df["year"].astype(int), df["q"].astype(int)))
     idx_by_key = {(int(y), int(q)): i for i, (y, q) in enumerate(zip(df["year"], df["q"]))}
     for src, dst in pairs:
         if src not in df.columns:
@@ -119,7 +124,8 @@ def _attach_yoy_by_year_q(
             if j is not None:
                 prev[i] = cur[j]
         with np.errstate(divide="ignore", invalid="ignore"):
-            yoy = (cur / np.where(prev == 0, np.nan, prev) - 1.0) * 100.0
+            denom = np.where(prev == 0, np.nan, np.abs(prev))
+            yoy = (cur - prev) / denom * 100.0
         df[dst] = yoy
 
 

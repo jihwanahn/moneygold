@@ -89,6 +89,48 @@ def test_yoy_is_nan_when_prior_is_zero():
     assert pd.isna(df.iloc[-1]["op_income_yoy"])
 
 
+def test_yoy_loss_to_profit_turnaround_reads_as_positive():
+    # SNDK pattern: 2025Q1 op_income = -42, 2026Q1 op_income = +4164.
+    # Naive (cur/prev - 1) gives -10014% (looks like a decline).
+    # Correct (cur - prev) / abs(prev) gives +10014% (real turnaround).
+    df = _quarters([
+        (2025, 1, 1695.0, -42.0),
+        (2026, 1, 5950.0, 4164.0),
+    ])
+    _attach_yoy_by_year_q(df, [("revenue", "revenue_yoy"), ("op_income", "op_income_yoy")])
+    last = df.iloc[-1]
+    # revenue is positive both years — formula reduces to standard YoY
+    assert last["revenue_yoy"] == pytest_approx(251.03, rel=1e-3)
+    # op_income turnaround: sign must be POSITIVE
+    assert last["op_income_yoy"] > 0
+    assert last["op_income_yoy"] == pytest_approx(10014.29, rel=1e-3)
+
+
+def test_yoy_profit_to_loss_reads_as_negative():
+    # Opposite case: prior was profit, current is loss. Must read negative.
+    df = _quarters([
+        (2024, 4, 100.0, 100.0),
+        (2025, 4, 80.0, -50.0),
+    ])
+    _attach_yoy_by_year_q(df, [("revenue", "revenue_yoy"), ("op_income", "op_income_yoy")])
+    last = df.iloc[-1]
+    assert last["revenue_yoy"] == pytest_approx(-20.0)
+    assert last["op_income_yoy"] < 0
+    assert last["op_income_yoy"] == pytest_approx(-150.0)  # (-50 - 100) / 100
+
+
+def test_yoy_loss_reduction_reads_as_positive():
+    # Both years negative, but loss got smaller — should read positive (improvement).
+    df = _quarters([
+        (2024, 4, 100.0, -200.0),
+        (2025, 4, 100.0, -50.0),
+    ])
+    _attach_yoy_by_year_q(df, [("revenue", "revenue_yoy"), ("op_income", "op_income_yoy")])
+    last = df.iloc[-1]
+    # (-50 - (-200)) / abs(-200) = 150 / 200 = +75%
+    assert last["op_income_yoy"] == pytest_approx(75.0)
+
+
 def test_build_fundamentals_from_cache_self_heals_buggy_stored_yoy():
     # Older parquets shipped with positional shift(4) YoY already baked in.
     # Reading should overwrite with the correct (year, q) match.
