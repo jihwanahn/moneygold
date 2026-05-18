@@ -165,6 +165,16 @@ with st.sidebar:
         default=sorted(master["market"].unique()),
         help=g.TOOLTIP_MARKET,
     )
+
+    if "tradable_kis" in master.columns:
+        only_tradable_kis = st.checkbox(
+            "🇰🇷 KIS 주문 가능 종목만",
+            value=False,
+            help="KIS 해외주식 master에 등록된 종목만 표시. "
+                 "`python -m moneygold.cli.sync --us-kis-crosscheck`로 동기화 필요.",
+        )
+    else:
+        only_tradable_kis = False
     min_rs = st.slider("RS rank 최소", 0, 100, 70, step=1, help=g.TOOLTIP_RS_MIN)
     box_states = st.multiselect(
         "박스 상태",
@@ -252,6 +262,15 @@ if not sigs_dict:
 
 watchlist_df = pd.DataFrame(sigs_dict.get("watchlist", []))
 new_buys_df = pd.DataFrame(sigs_dict.get("new_buys", []))
+
+# KIS 주문 가능 필터 (sidebar 토글). master에 tradable_kis 컬럼이 있을 때만 작동.
+if only_tradable_kis and "tradable_kis" in master.columns:
+    tradable_set = set(master[master["tradable_kis"]]["ticker"])
+    if not watchlist_df.empty:
+        watchlist_df = watchlist_df[watchlist_df["ticker"].isin(tradable_set)]
+    if not new_buys_df.empty:
+        new_buys_df = new_buys_df[new_buys_df["ticker"].isin(tradable_set)]
+    master = master[master["tradable_kis"]].reset_index(drop=True)
 
 # ---------- 상단: 요약 카드 ----------
 st.title("📊 moneygold — 종목 추천 대시보드")
@@ -361,6 +380,10 @@ with tab_gainers:
     df_g_all = _gainers_with_stage_cached(data_dir_str, asof_str, gainers_pct / 100.0)
     if gainers_markets:
         df_g_all = df_g_all[df_g_all["market"].isin(gainers_markets)]
+    # KIS 주문 가능 토글 (사이드바)
+    if only_tradable_kis and "tradable_kis" in master.columns:
+        _kis_set = set(master[master["tradable_kis"]]["ticker"])
+        df_g_all = df_g_all[df_g_all["ticker"].isin(_kis_set)]
 
     # 필터 적용 (df_g_all → df_g). 필터 끄면 동일.
     df_g = df_g_all.copy()

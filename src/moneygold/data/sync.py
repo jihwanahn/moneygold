@@ -231,6 +231,38 @@ class DataSync:
         log.info("US universe synced: %d tickers (total master rows %d)", len(us), len(combined))
         return us
 
+    def sync_kis_tradable_us(self) -> dict:
+        """KIS 해외주식 마스터로 master.parquet의 US 종목에 tradable_kis 컬럼 추가.
+
+        Returns
+        -------
+        dict  {'kis_total': N, 'us_master': M, 'tradable': T}
+            kis_total = KIS 마스터 총 종목 수 (3개 거래소 합)
+            us_master = master.parquet 내 US 종목 수
+            tradable = us_master 중 KIS-tradable로 매칭된 종목 수
+        """
+        from . import kis_overseas_master as kis_om
+
+        path = store.master_path(self.data_dir)
+        existing = store.read_parquet_safe(path)
+        if existing is None or existing.empty:
+            log.error("master.parquet 없음 — universe sync 먼저.")
+            return {"kis_total": 0, "us_master": 0, "tradable": 0}
+
+        kis_df = kis_om.fetch_kis_overseas_all()
+        annotated = kis_om.annotate_tradable_kis(existing, kis_df)
+        store.write_parquet_atomic(annotated, path)
+
+        n_us = int((annotated["market"] == "US").sum())
+        n_tradable = int(((annotated["market"] == "US") & annotated["tradable_kis"]).sum())
+        stats = {
+            "kis_total": len(kis_df),
+            "us_master": n_us,
+            "tradable": n_tradable,
+        }
+        log.info("KIS tradable 동기화: %s", stats)
+        return stats
+
     def backfill_bars_us(self, ticker: str, *, period: str = "2y") -> BackfillResult:
         """yfinance로 일봉 받아서 store/bars/{ticker}.parquet."""
         try:

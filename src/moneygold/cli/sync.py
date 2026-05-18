@@ -49,6 +49,8 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--consensus", action="store_true", help="컨센서스만 sync (yfinance, 대형주 위주)")
     mode.add_argument("--us", action="store_true",
                       help="미국 시스템 전체 sync: 마스터 + 일봉 + 지수 + 분기재무 + 컨센서스")
+    mode.add_argument("--us-kis-crosscheck", action="store_true",
+                      help="KIS 해외주식 master 다운로드 → master.parquet에 tradable_kis 추가")
 
     parser.add_argument("--tickers", help="특정 종목만. 콤마 구분. 예: 005930,000660")
     parser.add_argument("--limit", type=int, help="첫 N개 종목만 (디버그)")
@@ -70,11 +72,19 @@ def main(argv: list[str] | None = None) -> int:
     log = logging.getLogger("moneygold.cli.sync")
 
     # 모드 디폴트
-    if not (args.universe or args.backfill or args.daily or args.indices or args.financials or args.consensus or args.us):
+    if not (args.universe or args.backfill or args.daily or args.indices or args.financials or args.consensus or args.us or args.us_kis_crosscheck):
         args.daily = True
 
     kis = KISClient(cfg.kis)
     sync = DataSync(kis, Path(cfg.data_dir))
+
+    if args.us_kis_crosscheck:
+        log.info("== KIS 해외주식 master 다운로드 + 교차검증 ==")
+        stats = sync.sync_kis_tradable_us()
+        log.info("결과: KIS 전체=%d, US master=%d, tradable=%d (%.1f%%)",
+                 stats["kis_total"], stats["us_master"], stats["tradable"],
+                 100.0 * stats["tradable"] / max(stats["us_master"], 1))
+        return 0
 
     # 미국 시스템 전체 sync (yfinance 단독)
     if args.us:
