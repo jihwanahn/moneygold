@@ -316,30 +316,40 @@ with tab_gainers:
             help="좌측 분포는 전체, 우측 테이블만 BUY ∩ gainers로 좁힘.",
         )
 
-    # 시그너처 기반 noise 컷 필터 (탭 내부)
-    fctrl1, fctrl2 = st.columns([0.4, 0.6])
+    # 분류 필터 + mean-reversion 필터 (탭 내부, 기본 OFF)
+    st.markdown("**🧪 필터** (백테스트 검증된 사실 기반 — 위 expander 참조)")
+    fctrl1, fctrl2, fctrl3 = st.columns([0.3, 0.35, 0.35])
     with fctrl1:
         only_above_sma200 = st.checkbox(
-            "SMA200 위만 (Stage 4 자동 제거)", value=False,
+            "SMA200 위만 (분류용)", value=False,
             help=g.GAINERS_TOOLTIP_SMA200_FILTER,
         )
     with fctrl2:
         max_off_52w_high_pct = st.slider(
-            "52w 고가 -N% 이내 (0 = 비활성)", min_value=0, max_value=60, value=0, step=5,
+            "52w 고가 -N% 이내 (모멘텀)", min_value=0, max_value=60, value=0, step=5,
             help=g.GAINERS_TOOLTIP_52W_FILTER,
+        )
+    with fctrl3:
+        min_off_52w_high_pct = st.slider(
+            "⭐ 52w 고가 -N% 이상 (mean reversion)",
+            min_value=0, max_value=60, value=0, step=5,
+            help=g.GAINERS_TOOLTIP_52W_FAR_FILTER,
         )
 
     df_g_all = _gainers_with_stage_cached(data_dir_str, asof_str, gainers_pct / 100.0)
     if gainers_markets:
         df_g_all = df_g_all[df_g_all["market"].isin(gainers_markets)]
 
-    # 시그너처 필터 적용 (df_g_all → df_g). 필터 끄면 동일.
+    # 필터 적용 (df_g_all → df_g). 필터 끄면 동일.
     df_g = df_g_all.copy()
     if only_above_sma200 and "close_to_sma200" in df_g.columns:
         df_g = df_g[df_g["close_to_sma200"].fillna(0) >= 1.0]
     if max_off_52w_high_pct > 0 and "close_to_52w_high" in df_g.columns:
         thr = 1.0 - max_off_52w_high_pct / 100.0
         df_g = df_g[df_g["close_to_52w_high"].fillna(0) >= thr]
+    if min_off_52w_high_pct > 0 and "close_to_52w_high" in df_g.columns:
+        thr = 1.0 - min_off_52w_high_pct / 100.0
+        df_g = df_g[df_g["close_to_52w_high"].fillna(1.0) <= thr]
 
     if df_g_all.empty:
         st.info(f"asof {asof_str} 기준 +{gainers_pct:.1f}% 이상 상승 종목이 없습니다.")

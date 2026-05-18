@@ -60,17 +60,13 @@ TOOLTIP_TOP_N = (
 GAINERS_TAB_INTRO = """
 **왜 이 탭이 필요한가**
 
-오늘 +N% 오른 종목 = 모두 매수 후보가 아니다. Mark Weinstein의 4단계 관점에서:
+오늘 +N% 오른 종목 = 모두 매수 후보가 아니다. 이 탭은 두 가지를 *분리해서* 보여준다:
 
-- **Stage 2 (ADVANCING)** 종목이 오른다 → 추세 *지속* 신호 (사도 됨)
-- **Stage 4 (DECLINING)** 종목이 오른다 → *데드캣 바운스* 가능성 (단기 함정)
-- **Stage 1 (BASING)** 종목이 오른다 → 바닥 다지기 끝 신호 *일 수도* (변화 점)
-- **Stage 3 (TOPPING)** 종목이 오른다 → 천장에서의 마지막 발버둥 (위험)
+1. **현재 분류** — 오늘 오른 종목이 Weinstein 4단계 중 어디 있는가 (Stage 2 = 상승추세, Stage 4 = 하락추세 내 반등)
+2. **워치리스트 교집합** — 이미 signals.py가 BUY 후보로 잡은 종목과 겹치는 것
 
-이 탭은 오늘 상승한 종목을 Stage별로 분류해 *진짜 매수 후보*만 골라낸다.
-좌측 분포에서 Stage 2 비중을 확인하고, 우측에서 BUY 후보 풀(`signals.py`)과의
-교집합을 본다. 교집합 = Weinstein Stage 2 + Minervini 8/8 + 오늘 상승 = 최고
-신뢰도 후보.
+❗ **주의**: "현재 분류"는 *지금 어떤 상태*인지 알려주지 *미래 수익을 예측*하지 않는다.
+아래 *백테스트 검증* 섹션에서 어떤 feature가 실제로 forward return과 연관 있는지 확인할 것.
 """
 
 GAINERS_TOOLTIP_MIN_PCT = (
@@ -79,50 +75,81 @@ GAINERS_TOOLTIP_MIN_PCT = (
 )
 
 GAINERS_TOOLTIP_STAGE_DIST = (
-    "Stage 2(파랑) 비중이 높을수록 강세장의 정상적 상승. "
-    "Stage 4(빨강) 비중이 높으면 약세장의 일시 반등 — 매수하지 말 것."
+    "오늘 상승 종목의 *현재 추세 상태* 분포. Stage 2(상승 추세 안의 +1%) vs "
+    "Stage 4(하락 추세 안에서의 반등). ⚠ 분류일 뿐 forward return 예측이 아님 — "
+    "백테스트(2년)상 두 그룹 mean return 거의 동일."
 )
 
 GAINERS_TOOLTIP_BUY_INTERSECT = (
     "워치리스트(Stage 2 + Template 8/8) ∩ 오늘 상승. "
-    "신뢰도 최상위 신호 — 추세 + 기술적 모두 충족 + 시장이 인정."
+    "여러 *동시*조건을 통과한 종목 = 더 안정적 후보 (Sharpe 우위). "
+    "단, *평균 수익*은 일반 gainers와 비슷."
 )
 
 GAINERS_SIGNATURE_INTRO = """
-**Stage 2 vs Stage 4 시그너처 (asof 20260515 US gainers 실측 기준)**
+**🔬 백테스트 검증 결과 — 2년 / US / 262k events**
 
-오늘 +1% 이상 오른 종목 중에서:
+PR13에서 정의한 시그너처가 *forward return*과 연관 있는지 event study로 검증
+(`python -m moneygold.cli.gainers_backtest`로 재현 가능). 결과는 *상식과 반대*.
 
-| 지표 | Stage 2 (진짜) | Stage 4 (데드캣) |
-|---|---|---|
-| 종가/SMA200 | **1.29** (28% 위) | **0.79** (21% 아래) |
-| 종가/52w 고가 | 0.94 (-6%) | 0.55 (-45%) |
-| SMA50/SMA200 | 1.18 (Golden Cross) | 0.80 (Dead Cross) |
-| SMA200 기울기 | +0.002 (우상향) | -0.002 (우하향) |
-| 상대 거래량 (rvol) | 0.92 | 0.85 |
+**t+20d (한 달 후) forward return — baseline = ALL gainers (n=262,281, +3.58%)**
 
-**거래량은 거의 차이 없음**. *위치(SMA 대비, 52w 고가 대비)와 추세 방향*이
-모든 판별의 핵심. 아래 비교표에서 두 그룹의 median이 얼마나 다른지 확인.
+| 그룹 | n | 평균 | win% | Sharpe | edge vs ALL |
+|---|---|---|---|---|---|
+| Stage 2 | 142k | +3.49% | 55.8% | **0.168** | **-9 bps** |
+| Stage 4 | 108k | +3.75% | 55.2% | 0.116 | +18 bps |
+| SMA200 above | 154k | +3.43% | 55.2% | 0.151 | -15 bps |
+| SMA200 below | 108k | +3.79% | 56.1% | 0.125 | +21 bps |
+| Golden cross | 145k | +3.41% | 55.4% | 0.160 | -17 bps |
+| **52w 고가 -10% 이내** | 80k | **+2.57%** | 55.8% | 0.160 | **-101 bps** ❌ |
+| **52w 고가 -30% 이상** | 57k | **+5.86%** | 56.0% | 0.170 | **+228 bps** ⭐ |
+
+**무엇이 잘못되었나**:
+
+- ❌ "SMA200 위 / Golden cross / 신고가 근처 = Stage 2 진짜 후보" — *현재 분류*에는 맞지만
+  *forward return 예측력 없음*. 오히려 약간 underperform (mean reversion).
+- ❌ "Stage 4 = 데드캣 바운스 = 피해야 함" — 평균 수익으론 거의 동일. *Sharpe만* 차이.
+- ⭐ **유일하게 강하고 일관된 predictor**: *52w 고가에서의 거리*. 거리가 멀수록 forward
+  return 높음 (`+228 bps @ t+20d`, `+391 bps @ t+60d`). 강한 mean reversion.
+
+**무엇이 진짜인가**:
+
+- ✅ **Stage 2의 Sharpe 우위** (0.168 vs 0.116) — *평균*은 같아도 *변동성*이 작다.
+  안정성을 원하면 Stage 2 + 워치리스트 교집합.
+- ✅ **mean reversion이 momentum보다 강한 universe** — 우리 mcap≥$300M US 시장에서
+  신고가 근처 상승은 *모멘텀 소진*, 저가 반등은 *기술적 반등*.
+
+**남은 의문**: KR 시장도 같은가? 다른 timeframe(t+5d / +60d)에선? 어떤 *조합*이 진짜인가?
+이건 PR16 (RSI / Bollinger / ATR / VCP 등 추가 이론 검증)에서 확인.
 """
 
 GAINERS_TOOLTIP_SIG_TABLE = (
-    "각 Stage 그룹의 feature median. 행 별로 두 컬럼 값 차이가 클수록 강한 판별자. "
-    "특히 close_to_sma200, close_to_52w_high는 Stage 2 ≫ Stage 4."
+    "각 Stage 그룹의 feature median. 이건 *현재 분류 차이*를 보여주지 forward return을 "
+    "예측하지 않음. 백테스트 결과는 위 expander 참조."
 )
 
 GAINERS_TOOLTIP_SMA200_FILTER = (
-    "종가가 SMA200 위인 종목만 표시. Stage 4 데드캣 바운스를 자동 제거하는 "
-    "가장 단순한 필터 (실측상 Stage 2 후보의 91%가 SMA200 위, Stage 4는 14%)."
+    "종가가 SMA200 위인 종목만 표시. Stage 4 종목을 분류적으로 제거 — 단, "
+    "**forward return 측면에서는 거의 차이 없음** (백테스트 edge -15 bps). "
+    "안정적 분류용으로만 사용 권장."
 )
 
 GAINERS_TOOLTIP_52W_FILTER = (
-    "종가가 52주 고가 대비 -N% 이내인 종목만. -10% = 신고가 권역 근처. "
-    "Stage 2 후보는 대개 52w 고가 -6% 이내, Stage 4는 -45% 부근에서 반등."
+    "종가가 52주 고가 대비 -N% 이내인 종목만. ⚠ 백테스트상 *역효과*: 신고가 근처 "
+    "(-10% 이내)는 t+20d -101 bps underperform (모멘텀 소진). "
+    "*숨겨진 alpha는 정반대 방향* (아래 'mean reversion 후보' 필터 참조)."
+)
+
+GAINERS_TOOLTIP_52W_FAR_FILTER = (
+    "종가가 52주 고가에서 -N% 이상 떨어진 종목 (예: -30% = 52w 고가 0.7 이하). "
+    "백테스트상 가장 강한 단일 predictor: t+20d +228 bps, t+60d +391 bps. "
+    "단, 변동성도 큼 — 분산 매수 권장."
 )
 
 COL_CLOSE_TO_SMA200 = (
-    "종가 ÷ SMA200. 1.0 = SMA 위/아래 경계. 1.10 = SMA 위 10%. "
-    "Stage 2 진짜 추세는 보통 1.15+, Stage 4 데드캣은 0.9 이하."
+    "종가 ÷ SMA200. 1.0 = SMA 경계. 1.10 = SMA 위 10%. "
+    "*현재 추세 위치*를 보여주는 지표지 forward return predictor는 아님 "
+    "(백테스트 t+20d edge ±20 bps 이내)."
 )
 
 # ============================================================
