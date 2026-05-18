@@ -119,6 +119,24 @@ PR13에서 정의한 시그너처가 *forward return*과 연관 있는지 event 
 - ✅ **mean reversion이 momentum보다 강한 universe** — 우리 mcap≥$300M US 시장에서
   신고가 근처 상승은 *모멘텀 소진*, 저가 반등은 *기술적 반등*.
 
+**PR18 조합 검증 — 최강 실용 조합**
+
+Pullback ≥30%에 다른 predictor를 *교집합*해서 어떤 조합이 alpha를 강화하는가 (US 2년):
+
+| 조합 | n | t+20d edge | t+60d edge | Sharpe (60d) | 권장 사용 |
+|---|---|---|---|---|---|
+| Pullback ≥30% (단독) | 22k | +562 bps | +1,894 bps | 0.274 | 단순/큰 표본 |
+| ⭐ **Pullback≥30 + ATR<0.5** | 13.5k | **+622 bps** | **+2,026 bps** | 0.283 | **최강 실용** |
+| 🛡️ **Pullback≥30 + BB≤0.3** | 9.6k | +378 bps | +1,687 bps | **0.288** | **최고 Sharpe** |
+| Pullback≥30 + RSI<40 | 10.5k | +269 bps | +1,325 bps | 0.264 | RSI는 noise 추가 |
+| Pullback≥30 + ATR≥3 (극단) | 37/33 | +1,651 bps | +3,134 bps | 0.369 | 발견 시 강력 |
+
+**결론**: 최강 단일 조합은 *"50d 고가 -30% 이상 떨어진 종목이 평소 잠잠하다가 +1% 반등"*
+(P≥30 + ATR<0.5). 13,500 events / 2년 = 매일 ~27건. Win rate 64.5% @ t+60d. RSI를
+조합에 추가하면 오히려 alpha 감소.
+
+---
+
 **PR16 추가 검증 — Mean reversion 다른 angle (US 2년)**
 
 | Predictor | n | t+20d edge | t+60d edge | 가설 |
