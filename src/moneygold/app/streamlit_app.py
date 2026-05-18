@@ -23,6 +23,7 @@ if str(_SRC) not in sys.path:
 from moneygold import consensus as cons  # noqa: E402
 from moneygold import darvas as dv  # noqa: E402
 from moneygold import fundamentals as fund  # noqa: E402
+from moneygold import gainers as gn  # noqa: E402
 from moneygold import indicators as ind  # noqa: E402
 from moneygold import signals as sg  # noqa: E402
 from moneygold import stage as stg  # noqa: E402
@@ -269,312 +270,435 @@ with st.expander("❓ 이 대시보드 사용법 (처음 사용자 필독)", exp
     for code, (label, desc, color) in g.STAGE_DESC.items():
         st.markdown(f"- **Stage {code} {label}** ({color}) — {desc}")
 
-c1, c2, c3, c4 = st.columns(4)
-c1.metric(
-    "후보 풀 (Stage2 + Template)", len(watchlist_df),
-    help="Weinstein Stage 2 + Minervini 8조건 *모두* 통과한 종목 수.",
-)
-c2.metric(
-    "⭐ 박스 돌파", len(new_buys_df),
-    help="후보 풀 중 오늘 Darvas 박스 천장을 거래량 동반 돌파한 종목 수 (즉시 검토 대상).",
-)
-if not watchlist_df.empty:
-    c3.metric(
-        "RS rank 평균", f"{watchlist_df['rs_rank'].mean():.1f}",
-        help="워치리스트 종목들의 RS rank 평균 (Template 조건 8에서 이미 70+ 필터됨).",
-    )
-    c4.metric(
-        "rs_mom 최대", f"{watchlist_df['rs_momentum'].max():+.2f}",
-        help="가장 강한 모멘텀 종목의 가중 평균 수익률. +5.0 = 가중 500%.",
-    )
 
-st.divider()
+tab_main, tab_gainers = st.tabs(["📋 BUY 후보", "📈 오늘 상승"])
 
-# master에서 sector/mcap을 워치리스트에 join
-if not watchlist_df.empty and {"sector", "mcap"}.issubset(master.columns):
-    watchlist_df = watchlist_df.merge(
-        master[["ticker", "sector", "mcap"]], on="ticker", how="left",
+@st.cache_data(show_spinner="오늘 상승 종목 분석 중…")
+def _gainers_with_stage_cached(_data_dir_str: str, asof: str, min_pct: float) -> pd.DataFrame:
+    """daily_gainers + attach_stage 합쳐 캐시. min_pct 0이면 모든 상승 종목."""
+    from moneygold import gainers as _gn
+    df_g = _gn.daily_gainers(Path(_data_dir_str), asof=asof, min_pct=min_pct)
+    if df_g.empty:
+        return df_g
+    return _gn.attach_stage(df_g, Path(_data_dir_str), asof=asof)
+
+
+with tab_gainers:
+    st.subheader("📈 오늘 상승 종목의 패턴")
+    st.caption(
+        f"asof **{asof_str}**: 전일 대비 +N% 이상 상승한 종목의 Weinstein Stage 분포 + "
+        "BUY 후보 풀과의 교집합. 단순 상승이 *진짜* 추세인지, *데드캣 바운스*인지 판별용."
     )
 
-# ---------- 필터 적용 ----------
-if not watchlist_df.empty:
-    flt = watchlist_df.copy()
-    if markets:
-        flt = flt[flt["market"].isin(markets)]
-    flt = flt[flt["rs_rank"] >= min_rs]
-    if box_states:
-        flt = flt[flt["box_state"].isin(box_states)]
-    if sectors is not None and "sector" in flt.columns:
-        flt = flt[flt["sector"].isin(sectors)]
-    if mcap_min_krw is not None and "mcap" in flt.columns:
-        flt = flt[(flt["mcap"] >= mcap_min_krw) & (flt["mcap"] <= mcap_max_krw)]
-    # 펀더멘털 필터 (NaN은 통과 — 데이터 없는 종목은 거르지 않음)
-    if "revenue_yoy" in flt.columns and min_revenue_yoy > -50:
-        flt = flt[flt["revenue_yoy"].fillna(min_revenue_yoy) >= min_revenue_yoy]
-    if "op_margin" in flt.columns and min_op_margin > -30:
-        flt = flt[flt["op_margin"].fillna(min_op_margin) >= min_op_margin]
-    if "growth_quarters" in flt.columns and min_growth_q > 0:
-        flt = flt[flt["growth_quarters"].fillna(0) >= min_growth_q]
-    if only_accelerating and "accelerating" in flt.columns:
-        flt = flt[flt["accelerating"] == True]
-    # 컨센서스 필터 (NaN/0 = 통과)
-    if "cons_n_analysts" in flt.columns and min_n_analysts > 0:
-        flt = flt[flt["cons_n_analysts"].fillna(0) >= min_n_analysts]
-    if "cons_target_upside_pct" in flt.columns and min_upside_pct > -50:
-        flt = flt[flt["cons_target_upside_pct"].fillna(min_upside_pct) >= min_upside_pct]
-    if "cons_rev_eps_0y_30d_pct" in flt.columns and min_eps_revision_0y_pct > -50:
-        flt = flt[flt["cons_rev_eps_0y_30d_pct"].fillna(min_eps_revision_0y_pct) >= min_eps_revision_0y_pct]
-    if "cons_eps_net_revisions_30d" in flt.columns and min_net_revisions > -20:
-        flt = flt[flt["cons_eps_net_revisions_30d"].fillna(0) >= min_net_revisions]
-    flt = flt.sort_values("rs_rank", ascending=False).reset_index(drop=True)
-else:
-    flt = watchlist_df
+    with st.expander("❓ 이 탭의 의미 (처음 보는 경우)", expanded=False):
+        st.markdown(g.GAINERS_TAB_INTRO)
 
-# ---------- 메인 2단: 좌측 워치리스트 / 우측 차트 ----------
-left, right = st.columns([0.42, 0.58])
-
-with left:
-    st.subheader(f"BUY 후보 풀 ({len(flt)}건 필터링)")
-
-    if flt.empty:
-        st.info("필터 조건에 맞는 종목이 없습니다.")
-        selected_ticker = None
-    else:
-        base_cols = ["ticker", "name", "market"]
-        if "mcap" in flt.columns: base_cols.append("mcap")
-        base_cols.extend(["rs_rank", "rs_momentum", "close", "box_state",
-                          "days_in_box", "suggested_stop"])
-        # 펀더멘털 컬럼
-        for c in ["revenue_yoy", "op_income_yoy", "op_margin",
-                  "growth_quarters", "op_growth_quarters", "accelerating"]:
-            if c in flt.columns:
-                base_cols.append(c)
-        # 컨센서스 컬럼 (정적 + 상향 조정)
-        for c in ["cons_n_analysts", "cons_target_upside_pct", "cons_recommendation",
-                  "cons_earnings_growth", "cons_last_surprise_pct",
-                  "cons_rev_eps_0y_30d_pct", "cons_eps_net_revisions_30d"]:
-            if c in flt.columns:
-                base_cols.append(c)
-        disp = flt[base_cols].head(top_n).copy()
-        disp["rs_rank"] = disp["rs_rank"].round(1)
-        disp["rs_momentum"] = disp["rs_momentum"].round(2)
-        if "mcap" in disp.columns:
-            disp["mcap_trillion"] = (disp["mcap"] / 1e12).round(3)
-            disp = disp.drop(columns=["mcap"])
-        for c in ["revenue_yoy", "op_income_yoy", "op_margin",
-                  "cons_target_upside_pct", "cons_earnings_growth", "cons_last_surprise_pct",
-                  "cons_rev_eps_0y_30d_pct"]:
-            if c in disp.columns:
-                disp[c] = disp[c].round(1)
-
-        # 컬럼 라벨/포맷 + 툴팁
-        col_cfg = {
-            "ticker": st.column_config.TextColumn("종목", help=g.COL_TICKER),
-            "name": st.column_config.TextColumn("이름", help=g.COL_NAME),
-            "market": st.column_config.TextColumn("시장", help=g.COL_MARKET),
-            "rs_rank": st.column_config.NumberColumn("RS", format="%.1f", help=g.COL_RS_RANK),
-            "rs_momentum": st.column_config.NumberColumn("rs_mom", format="%+.2f", help=g.COL_RS_MOMENTUM),
-            "close": st.column_config.NumberColumn("종가", format="%,d", help=g.COL_CLOSE),
-            "box_state": st.column_config.TextColumn("박스", help=g.COL_BOX_STATE),
-            "days_in_box": st.column_config.NumberColumn("box일", format="%d", help=g.COL_DAYS_IN_BOX),
-            "suggested_stop": st.column_config.NumberColumn("stop hint", format="%,d", help=g.COL_SUGGESTED_STOP),
-        }
-        if "mcap_trillion" in disp.columns:
-            col_cfg["mcap_trillion"] = st.column_config.NumberColumn("시총(조)", format="%.2f", help=g.COL_MCAP_TRILLION)
-        # 펀더멘털
-        if "revenue_yoy" in disp.columns:
-            col_cfg["revenue_yoy"] = st.column_config.NumberColumn(
-                "매출YoY%", format="%+.1f",
-                help="가장 최근 분기 매출 YoY 성장률. 25% 이상이 미네비니 권장. NaN = 데이터 없음.")
-        if "op_income_yoy" in disp.columns:
-            col_cfg["op_income_yoy"] = st.column_config.NumberColumn(
-                "영익YoY%", format="%+.1f",
-                help="가장 최근 분기 영업이익 YoY 성장률.")
-        if "op_margin" in disp.columns:
-            col_cfg["op_margin"] = st.column_config.NumberColumn(
-                "영익률%", format="%.1f",
-                help="가장 최근 분기 영업이익률 = 영업이익 ÷ 매출.")
-        if "growth_quarters" in disp.columns:
-            col_cfg["growth_quarters"] = st.column_config.NumberColumn(
-                "연속매출↑", format="%d",
-                help="매출 YoY > 0이 연속 N분기. 8 = 2년 연속 성장.")
-        if "op_growth_quarters" in disp.columns:
-            col_cfg["op_growth_quarters"] = st.column_config.NumberColumn(
-                "연속영익↑", format="%d",
-                help="영업이익 YoY > 0이 연속 N분기.")
-        if "accelerating" in disp.columns:
-            col_cfg["accelerating"] = st.column_config.CheckboxColumn(
-                "가속",
-                help="최근 분기 YoY > 직전 분기 YoY (매출 또는 영업이익). 가속하는 종목은 추세 강세.")
-        # 컨센서스
-        if "cons_n_analysts" in disp.columns:
-            col_cfg["cons_n_analysts"] = st.column_config.NumberColumn(
-                "애널수", format="%d",
-                help="yfinance가 보유한 애널리스트 추정치 수. 5+ 신뢰도 OK. 한국 대형주는 20~38명.")
-        if "cons_target_upside_pct" in disp.columns:
-            col_cfg["cons_target_upside_pct"] = st.column_config.NumberColumn(
-                "목표가↑%", format="%+.1f",
-                help="(애널 평균 목표가 - 현재가) / 현재가. 양수 = 추가 상승여력 있다는 컨센서스.")
-        if "cons_recommendation" in disp.columns:
-            col_cfg["cons_recommendation"] = st.column_config.TextColumn(
-                "추천",
-                help="strong_buy / buy / hold / sell / strong_sell / none.")
-        if "cons_earnings_growth" in disp.columns:
-            col_cfg["cons_earnings_growth"] = st.column_config.NumberColumn(
-                "예상 EPS↑%", format="%+.1f",
-                help="향후 12개월 예상 EPS 성장률 (애널 평균).")
-        if "cons_last_surprise_pct" in disp.columns:
-            col_cfg["cons_last_surprise_pct"] = st.column_config.NumberColumn(
-                "최근 서프라이즈%", format="%+.1f",
-                help="가장 최근 분기 실적 - 컨센서스 예상 = 서프라이즈. 양수 = 어닝비트, 음수 = 어닝미스.")
-        if "cons_rev_eps_0y_30d_pct" in disp.columns:
-            col_cfg["cons_rev_eps_0y_30d_pct"] = st.column_config.NumberColumn(
-                "EPS상향%(30d)", format="%+.1f",
-                help="이번 연도 EPS 컨센서스 추정의 30일 전 대비 변화율. "
-                     "+10% 이상 = 애널들이 실적을 크게 상향 조정 중 (강한 신호).")
-        if "cons_eps_net_revisions_30d" in disp.columns:
-            col_cfg["cons_eps_net_revisions_30d"] = st.column_config.NumberColumn(
-                "순상향(30d)", format="%+d",
-                help="30일간 상향 분석가 수 - 하향 수. 양수 = 더 많은 분석가가 추정을 올림.")
-
-        evt = st.dataframe(
-            disp, use_container_width=True, hide_index=True, height=620,
-            on_select="rerun", selection_mode="single-row",
-            column_config=col_cfg,
+    gctrl1, gctrl2, gctrl3 = st.columns([0.3, 0.4, 0.3])
+    with gctrl1:
+        gainers_pct = st.slider(
+            "최소 상승률 (%)", min_value=0.0, max_value=10.0, value=1.0, step=0.5,
+            help=g.GAINERS_TOOLTIP_MIN_PCT,
         )
-        sel = evt.selection.rows if evt and evt.selection else []
-        selected_ticker = disp.iloc[sel[0]]["ticker"] if sel else (disp.iloc[0]["ticker"] if not disp.empty else None)
-
-with right:
-    if selected_ticker:
-        row = master[master["ticker"] == selected_ticker]
-        sel_name = row.iloc[0]["name"] if not row.empty else "?"
-        sel_market = row.iloc[0]["market"] if not row.empty else "?"
-        st.subheader(f"{selected_ticker} {sel_name} ({sel_market})")
-
-        bars = _load_bars(data_dir_str, selected_ticker)
-        if not bars.empty:
-            bars = bars[bars["date"] <= asof_str].sort_values("date").reset_index(drop=True)
-
-            # 차트
-            stage_params = stg.StageParams(
-                ma_length=cfg.strategy.stage_ma_length,
-                slope_lookback=cfg.strategy.stage_slope_lookback,
-                slope_threshold_pct=cfg.strategy.stage_slope_threshold_pct,
-                band_pct=cfg.strategy.stage_band_pct,
-                ma_type=cfg.strategy.stage_ma_type,
-            )
-            box_params = dv.BoxParams(
-                box_high_lookback=cfg.strategy.box_high_lookback,
-                box_high_confirm=cfg.strategy.box_high_confirm,
-                box_height_max_pct=cfg.strategy.box_height_max_pct,
-                box_valid_min_days=cfg.strategy.box_valid_min_days,
-                box_stale_days=cfg.strategy.box_stale_days,
-                breakout_buffer=cfg.strategy.breakout_buffer,
-                breakout_volume_mult=cfg.strategy.breakout_volume_mult,
-            )
-
-            tail = st.slider(
-                "차트 기간 (영업일)", min_value=60, max_value=486, value=252, step=10,
-                key=f"tail_{selected_ticker}",
-                help="60 = 약 3개월, 252 = 1년, 486 = 2년 (백필 한도). 추세 길게 보려면 큰 값.",
-            )
-            fig = build_detail_chart(
-                bars, name=f"{selected_ticker} {sel_name}",
-                tail=tail, stage_params=stage_params, box_params=box_params,
-            )
-            st.plotly_chart(fig, use_container_width=True)
-
-            # 미네비니 8조건 패널
-            wl_row = flt[flt["ticker"] == selected_ticker]
-            if not wl_row.empty:
-                wl = wl_row.iloc[0]
-                with st.expander("미네비니 8조건 + 진단 (마우스 오버로 의미 확인)", expanded=True):
-                    st.caption(
-                        "Mark Minervini의 *Trade Like a Stock Market Wizard*에서 추출한 "
-                        "Trend Template. 8개 모두 통과한 종목만 BUY 후보로 인정."
-                    )
-                    rs_v = float(wl["rs_rank"])
-                    t = tmpl.check_template(
-                        bars["close"].astype(float), rs_v,
-                        sma200_slope_lookback=cfg.strategy.sma200_slope_lookback,
-                        rs_rank_min=float(cfg.strategy.rs_rank_min),
-                        high_series=bars["high"].astype(float) if "high" in bars.columns else None,
-                        low_series=bars["low"].astype(float) if "low" in bars.columns else None,
-                    )
-                    rows = [
-                        {"조건": title, "의미": desc, "통과": "✅" if c else "❌"}
-                        for (title, _ko, desc), c in zip(g.MINERVINI_CONDITIONS, t.checks)
-                    ]
-                    st.dataframe(
-                        pd.DataFrame(rows), use_container_width=True, hide_index=True,
-                        column_config={
-                            "조건": st.column_config.TextColumn("조건", width="medium"),
-                            "의미": st.column_config.TextColumn("의미 (한 줄)", width="large"),
-                            "통과": st.column_config.TextColumn("통과", width="small"),
-                        },
-                    )
-
-                    st.markdown(
-                        f"**진입 가이드** — 종가 `{wl['close']:,.0f}` · "
-                        f"권장 손절 `{wl['suggested_stop']:,.0f}` · "
-                        f"박스 `{wl['box_state']}` (top {wl['box_top']} / bottom {wl['box_bottom']})"
-                    )
-                    st.caption(
-                        "💡 권장 손절은 박스 바닥 또는 종가 -7% 중 하나. "
-                        "실제 진입가·손절가는 차트 보고 본인이 결정."
-                    )
-        else:
-            st.warning("선택한 종목의 bars 데이터를 찾을 수 없습니다.")
-    else:
-        st.info("좌측 워치리스트에서 종목을 선택하면 차트가 나타납니다.")
-
-# ---------- 하단: 박스 돌파 + RS 분포 ----------
-st.divider()
-b1, b2 = st.columns([0.5, 0.5])
-
-with b1:
-    st.subheader("⭐ 오늘 박스 돌파")
-    st.caption("Darvas 박스 천장 + 0.3% 위로 종가 돌파. 즉시 검토 대상.")
-    if new_buys_df.empty:
-        st.info("오늘 박스 돌파 종목 없음")
-    else:
-        nb_disp = new_buys_df[["ticker", "name", "market", "rs_rank", "entry_guide",
-                                "stop", "box_top", "box_bottom", "days_in_box",
-                                "volume_ratio", "is_gap_breakout"]].copy()
-        nb_disp["rs_rank"] = nb_disp["rs_rank"].round(1)
-        nb_disp["volume_ratio"] = nb_disp["volume_ratio"].round(2)
-        st.dataframe(
-            nb_disp, use_container_width=True, hide_index=True,
-            column_config={
-                "ticker": st.column_config.TextColumn("종목", help=g.COL_TICKER),
-                "name": st.column_config.TextColumn("이름"),
-                "market": st.column_config.TextColumn("시장"),
-                "rs_rank": st.column_config.NumberColumn("RS", format="%.1f", help=g.COL_RS_RANK),
-                "entry_guide": st.column_config.NumberColumn("진입가", format="%,d",
-                                                              help="박스 천장 × 1.003 (참고)"),
-                "stop": st.column_config.NumberColumn("손절", format="%,d",
-                                                       help="박스 바닥 — 이 아래로 종가 마감 시 청산"),
-                "box_top": st.column_config.NumberColumn("box top", format="%,d"),
-                "box_bottom": st.column_config.NumberColumn("box bot", format="%,d"),
-                "days_in_box": st.column_config.NumberColumn("box일", format="%d",
-                                                              help=g.COL_DAYS_IN_BOX),
-                "volume_ratio": st.column_config.NumberColumn("vol×", format="%.2f",
-                                                               help=g.COL_VOLUME_RATIO),
-                "is_gap_breakout": st.column_config.CheckboxColumn("gap", help=g.COL_IS_GAP),
-            },
+    with gctrl2:
+        market_options = sorted(master["market"].unique())
+        gainers_markets = st.multiselect(
+            "시장 (오늘 상승 탭 한정)", market_options, default=market_options,
+            key="gainers_markets",
+            help="이 탭에만 적용. 사이드바 시장 필터와 무관.",
+        )
+    with gctrl3:
+        only_buy_intersection = st.checkbox(
+            "BUY 후보 교집합만", value=False,
+            help="좌측 분포는 전체, 우측 테이블만 BUY ∩ gainers로 좁힘.",
         )
 
-with b2:
-    st.subheader("RS rank 분포 (워치리스트)")
-    st.caption("같은 시장(KOSPI 또는 KOSDAQ) 내 종목들의 상대 강도 백분위 0~100.")
+    df_g = _gainers_with_stage_cached(data_dir_str, asof_str, gainers_pct / 100.0)
+    if gainers_markets:
+        df_g = df_g[df_g["market"].isin(gainers_markets)]
+
+    if df_g.empty:
+        st.info(f"asof {asof_str} 기준 +{gainers_pct:.1f}% 이상 상승 종목이 없습니다.")
+    else:
+        # 메트릭
+        m1, m2, m3, m4 = st.columns(4)
+        buy_set = set(watchlist_df["ticker"]) if not watchlist_df.empty else set()
+        inter_df = df_g[df_g["ticker"].isin(buy_set)]
+        stage2_df = df_g[df_g["stage"] == stg.STAGE_ADVANCING]
+        m1.metric("상승 종목", len(df_g),
+                  help=f"+{gainers_pct:.1f}% 이상 종목 수.")
+        m2.metric("Stage 2 (ADVANCING)", len(stage2_df),
+                  help="진짜 추세 지속 가능성. SMA150 위 + 상승 기울기.")
+        m3.metric("Stage 4 (DECLINING)",
+                  int((df_g["stage"] == stg.STAGE_DECLINING).sum()),
+                  help="하락 추세 안에서의 반등 — 데드캣 바운스 가능성.")
+        m4.metric("BUY ∩ 상승", len(inter_df),
+                  help="워치리스트(Stage2+Template8/8) ∩ 오늘 상승.")
+
+        st.divider()
+
+        gl, gr = st.columns([0.4, 0.6])
+        with gl:
+            st.markdown("**Stage 분포 (오늘 상승 종목)**")
+            st.caption(g.GAINERS_TOOLTIP_STAGE_DIST)
+            dist = gn.stage_distribution(df_g["stage"])
+            chart_df = dist.set_index("stage_name")[["count"]]
+            st.bar_chart(chart_df, height=320, color="#3b82f6")
+            st.dataframe(
+                dist, hide_index=True, use_container_width=True,
+                column_config={
+                    "stage": st.column_config.NumberColumn("Stage", format="%d"),
+                    "stage_name": st.column_config.TextColumn("이름"),
+                    "count": st.column_config.NumberColumn("종목 수", format="%d"),
+                    "pct": st.column_config.NumberColumn("%", format="%.1f"),
+                },
+            )
+
+        with gr:
+            if only_buy_intersection:
+                disp_df = inter_df.copy()
+                st.markdown(f"**BUY ∩ 오늘 상승 ({len(disp_df)}건)**")
+                st.caption(g.GAINERS_TOOLTIP_BUY_INTERSECT)
+            else:
+                disp_df = df_g.copy()
+                disp_df["is_buy"] = disp_df["ticker"].isin(buy_set)
+                st.markdown(f"**오늘 상승 종목 전체 ({len(disp_df)}건)**")
+                st.caption("`is_buy` = 워치리스트 교집합 여부.")
+
+            if disp_df.empty:
+                st.info("해당 조건에 맞는 종목 없음.")
+            else:
+                disp_df = disp_df.sort_values("pct_chg", ascending=False).head(200)
+                disp_df["pct_chg_pct"] = (disp_df["pct_chg"] * 100).round(2)
+                cols = ["ticker", "name", "market", "stage_name", "pct_chg_pct",
+                        "close", "prev_close"]
+                if "is_buy" in disp_df.columns:
+                    cols.append("is_buy")
+                col_cfg = {
+                    "ticker": st.column_config.TextColumn("종목"),
+                    "name": st.column_config.TextColumn("이름"),
+                    "market": st.column_config.TextColumn("시장"),
+                    "stage_name": st.column_config.TextColumn("Stage",
+                        help="0 UNKNOWN / 1 BASING / 2 ADVANCING / 3 TOPPING / 4 DECLINING"),
+                    "pct_chg_pct": st.column_config.NumberColumn("상승률%", format="%+.2f"),
+                    "close": st.column_config.NumberColumn("종가", format="%,.2f"),
+                    "prev_close": st.column_config.NumberColumn("전일", format="%,.2f"),
+                }
+                if "is_buy" in disp_df.columns:
+                    col_cfg["is_buy"] = st.column_config.CheckboxColumn(
+                        "BUY 후보", help="signals.py 워치리스트(Stage2+Template8/8)에 포함되는 종목.",
+                    )
+                st.dataframe(
+                    disp_df[cols], hide_index=True, use_container_width=True, height=600,
+                    column_config=col_cfg,
+                )
+
+with tab_main:
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric(
+        "후보 풀 (Stage2 + Template)", len(watchlist_df),
+        help="Weinstein Stage 2 + Minervini 8조건 *모두* 통과한 종목 수.",
+    )
+    c2.metric(
+        "⭐ 박스 돌파", len(new_buys_df),
+        help="후보 풀 중 오늘 Darvas 박스 천장을 거래량 동반 돌파한 종목 수 (즉시 검토 대상).",
+    )
     if not watchlist_df.empty:
-        st.plotly_chart(
-            build_rs_distribution(watchlist_df["rs_rank"]),
-            use_container_width=True,
+        c3.metric(
+            "RS rank 평균", f"{watchlist_df['rs_rank'].mean():.1f}",
+            help="워치리스트 종목들의 RS rank 평균 (Template 조건 8에서 이미 70+ 필터됨).",
+        )
+        c4.metric(
+            "rs_mom 최대", f"{watchlist_df['rs_momentum'].max():+.2f}",
+            help="가장 강한 모멘텀 종목의 가중 평균 수익률. +5.0 = 가중 500%.",
         )
 
-st.caption(
-    "⚠️ 이 대시보드는 종목 *추천*만 합니다. 진입 가격·시점·수량은 사용자가 차트를 보고 직접 결정. "
-    "백테스트 결과는 자동매매 가정 하의 *상한선* 추정으로 실제 결과와 다릅니다."
-)
+    st.divider()
+
+    # master에서 sector/mcap을 워치리스트에 join
+    if not watchlist_df.empty and {"sector", "mcap"}.issubset(master.columns):
+        watchlist_df = watchlist_df.merge(
+            master[["ticker", "sector", "mcap"]], on="ticker", how="left",
+        )
+
+    # ---------- 필터 적용 ----------
+    if not watchlist_df.empty:
+        flt = watchlist_df.copy()
+        if markets:
+            flt = flt[flt["market"].isin(markets)]
+        flt = flt[flt["rs_rank"] >= min_rs]
+        if box_states:
+            flt = flt[flt["box_state"].isin(box_states)]
+        if sectors is not None and "sector" in flt.columns:
+            flt = flt[flt["sector"].isin(sectors)]
+        if mcap_min_krw is not None and "mcap" in flt.columns:
+            flt = flt[(flt["mcap"] >= mcap_min_krw) & (flt["mcap"] <= mcap_max_krw)]
+        # 펀더멘털 필터 (NaN은 통과 — 데이터 없는 종목은 거르지 않음)
+        if "revenue_yoy" in flt.columns and min_revenue_yoy > -50:
+            flt = flt[flt["revenue_yoy"].fillna(min_revenue_yoy) >= min_revenue_yoy]
+        if "op_margin" in flt.columns and min_op_margin > -30:
+            flt = flt[flt["op_margin"].fillna(min_op_margin) >= min_op_margin]
+        if "growth_quarters" in flt.columns and min_growth_q > 0:
+            flt = flt[flt["growth_quarters"].fillna(0) >= min_growth_q]
+        if only_accelerating and "accelerating" in flt.columns:
+            flt = flt[flt["accelerating"] == True]
+        # 컨센서스 필터 (NaN/0 = 통과)
+        if "cons_n_analysts" in flt.columns and min_n_analysts > 0:
+            flt = flt[flt["cons_n_analysts"].fillna(0) >= min_n_analysts]
+        if "cons_target_upside_pct" in flt.columns and min_upside_pct > -50:
+            flt = flt[flt["cons_target_upside_pct"].fillna(min_upside_pct) >= min_upside_pct]
+        if "cons_rev_eps_0y_30d_pct" in flt.columns and min_eps_revision_0y_pct > -50:
+            flt = flt[flt["cons_rev_eps_0y_30d_pct"].fillna(min_eps_revision_0y_pct) >= min_eps_revision_0y_pct]
+        if "cons_eps_net_revisions_30d" in flt.columns and min_net_revisions > -20:
+            flt = flt[flt["cons_eps_net_revisions_30d"].fillna(0) >= min_net_revisions]
+        flt = flt.sort_values("rs_rank", ascending=False).reset_index(drop=True)
+    else:
+        flt = watchlist_df
+
+    # ---------- 메인 2단: 좌측 워치리스트 / 우측 차트 ----------
+    left, right = st.columns([0.42, 0.58])
+
+    with left:
+        st.subheader(f"BUY 후보 풀 ({len(flt)}건 필터링)")
+
+        if flt.empty:
+            st.info("필터 조건에 맞는 종목이 없습니다.")
+            selected_ticker = None
+        else:
+            base_cols = ["ticker", "name", "market"]
+            if "mcap" in flt.columns: base_cols.append("mcap")
+            base_cols.extend(["rs_rank", "rs_momentum", "close", "box_state",
+                              "days_in_box", "suggested_stop"])
+            # 펀더멘털 컬럼
+            for c in ["revenue_yoy", "op_income_yoy", "op_margin",
+                      "growth_quarters", "op_growth_quarters", "accelerating"]:
+                if c in flt.columns:
+                    base_cols.append(c)
+            # 컨센서스 컬럼 (정적 + 상향 조정)
+            for c in ["cons_n_analysts", "cons_target_upside_pct", "cons_recommendation",
+                      "cons_earnings_growth", "cons_last_surprise_pct",
+                      "cons_rev_eps_0y_30d_pct", "cons_eps_net_revisions_30d"]:
+                if c in flt.columns:
+                    base_cols.append(c)
+            disp = flt[base_cols].head(top_n).copy()
+            disp["rs_rank"] = disp["rs_rank"].round(1)
+            disp["rs_momentum"] = disp["rs_momentum"].round(2)
+            if "mcap" in disp.columns:
+                disp["mcap_trillion"] = (disp["mcap"] / 1e12).round(3)
+                disp = disp.drop(columns=["mcap"])
+            for c in ["revenue_yoy", "op_income_yoy", "op_margin",
+                      "cons_target_upside_pct", "cons_earnings_growth", "cons_last_surprise_pct",
+                      "cons_rev_eps_0y_30d_pct"]:
+                if c in disp.columns:
+                    disp[c] = disp[c].round(1)
+
+            # 컬럼 라벨/포맷 + 툴팁
+            col_cfg = {
+                "ticker": st.column_config.TextColumn("종목", help=g.COL_TICKER),
+                "name": st.column_config.TextColumn("이름", help=g.COL_NAME),
+                "market": st.column_config.TextColumn("시장", help=g.COL_MARKET),
+                "rs_rank": st.column_config.NumberColumn("RS", format="%.1f", help=g.COL_RS_RANK),
+                "rs_momentum": st.column_config.NumberColumn("rs_mom", format="%+.2f", help=g.COL_RS_MOMENTUM),
+                "close": st.column_config.NumberColumn("종가", format="%,d", help=g.COL_CLOSE),
+                "box_state": st.column_config.TextColumn("박스", help=g.COL_BOX_STATE),
+                "days_in_box": st.column_config.NumberColumn("box일", format="%d", help=g.COL_DAYS_IN_BOX),
+                "suggested_stop": st.column_config.NumberColumn("stop hint", format="%,d", help=g.COL_SUGGESTED_STOP),
+            }
+            if "mcap_trillion" in disp.columns:
+                col_cfg["mcap_trillion"] = st.column_config.NumberColumn("시총(조)", format="%.2f", help=g.COL_MCAP_TRILLION)
+            # 펀더멘털
+            if "revenue_yoy" in disp.columns:
+                col_cfg["revenue_yoy"] = st.column_config.NumberColumn(
+                    "매출YoY%", format="%+.1f",
+                    help="가장 최근 분기 매출 YoY 성장률. 25% 이상이 미네비니 권장. NaN = 데이터 없음.")
+            if "op_income_yoy" in disp.columns:
+                col_cfg["op_income_yoy"] = st.column_config.NumberColumn(
+                    "영익YoY%", format="%+.1f",
+                    help="가장 최근 분기 영업이익 YoY 성장률.")
+            if "op_margin" in disp.columns:
+                col_cfg["op_margin"] = st.column_config.NumberColumn(
+                    "영익률%", format="%.1f",
+                    help="가장 최근 분기 영업이익률 = 영업이익 ÷ 매출.")
+            if "growth_quarters" in disp.columns:
+                col_cfg["growth_quarters"] = st.column_config.NumberColumn(
+                    "연속매출↑", format="%d",
+                    help="매출 YoY > 0이 연속 N분기. 8 = 2년 연속 성장.")
+            if "op_growth_quarters" in disp.columns:
+                col_cfg["op_growth_quarters"] = st.column_config.NumberColumn(
+                    "연속영익↑", format="%d",
+                    help="영업이익 YoY > 0이 연속 N분기.")
+            if "accelerating" in disp.columns:
+                col_cfg["accelerating"] = st.column_config.CheckboxColumn(
+                    "가속",
+                    help="최근 분기 YoY > 직전 분기 YoY (매출 또는 영업이익). 가속하는 종목은 추세 강세.")
+            # 컨센서스
+            if "cons_n_analysts" in disp.columns:
+                col_cfg["cons_n_analysts"] = st.column_config.NumberColumn(
+                    "애널수", format="%d",
+                    help="yfinance가 보유한 애널리스트 추정치 수. 5+ 신뢰도 OK. 한국 대형주는 20~38명.")
+            if "cons_target_upside_pct" in disp.columns:
+                col_cfg["cons_target_upside_pct"] = st.column_config.NumberColumn(
+                    "목표가↑%", format="%+.1f",
+                    help="(애널 평균 목표가 - 현재가) / 현재가. 양수 = 추가 상승여력 있다는 컨센서스.")
+            if "cons_recommendation" in disp.columns:
+                col_cfg["cons_recommendation"] = st.column_config.TextColumn(
+                    "추천",
+                    help="strong_buy / buy / hold / sell / strong_sell / none.")
+            if "cons_earnings_growth" in disp.columns:
+                col_cfg["cons_earnings_growth"] = st.column_config.NumberColumn(
+                    "예상 EPS↑%", format="%+.1f",
+                    help="향후 12개월 예상 EPS 성장률 (애널 평균).")
+            if "cons_last_surprise_pct" in disp.columns:
+                col_cfg["cons_last_surprise_pct"] = st.column_config.NumberColumn(
+                    "최근 서프라이즈%", format="%+.1f",
+                    help="가장 최근 분기 실적 - 컨센서스 예상 = 서프라이즈. 양수 = 어닝비트, 음수 = 어닝미스.")
+            if "cons_rev_eps_0y_30d_pct" in disp.columns:
+                col_cfg["cons_rev_eps_0y_30d_pct"] = st.column_config.NumberColumn(
+                    "EPS상향%(30d)", format="%+.1f",
+                    help="이번 연도 EPS 컨센서스 추정의 30일 전 대비 변화율. "
+                         "+10% 이상 = 애널들이 실적을 크게 상향 조정 중 (강한 신호).")
+            if "cons_eps_net_revisions_30d" in disp.columns:
+                col_cfg["cons_eps_net_revisions_30d"] = st.column_config.NumberColumn(
+                    "순상향(30d)", format="%+d",
+                    help="30일간 상향 분석가 수 - 하향 수. 양수 = 더 많은 분석가가 추정을 올림.")
+
+            evt = st.dataframe(
+                disp, use_container_width=True, hide_index=True, height=620,
+                on_select="rerun", selection_mode="single-row",
+                column_config=col_cfg,
+            )
+            sel = evt.selection.rows if evt and evt.selection else []
+            selected_ticker = disp.iloc[sel[0]]["ticker"] if sel else (disp.iloc[0]["ticker"] if not disp.empty else None)
+
+    with right:
+        if selected_ticker:
+            row = master[master["ticker"] == selected_ticker]
+            sel_name = row.iloc[0]["name"] if not row.empty else "?"
+            sel_market = row.iloc[0]["market"] if not row.empty else "?"
+            st.subheader(f"{selected_ticker} {sel_name} ({sel_market})")
+
+            bars = _load_bars(data_dir_str, selected_ticker)
+            if not bars.empty:
+                bars = bars[bars["date"] <= asof_str].sort_values("date").reset_index(drop=True)
+
+                # 차트
+                stage_params = stg.StageParams(
+                    ma_length=cfg.strategy.stage_ma_length,
+                    slope_lookback=cfg.strategy.stage_slope_lookback,
+                    slope_threshold_pct=cfg.strategy.stage_slope_threshold_pct,
+                    band_pct=cfg.strategy.stage_band_pct,
+                    ma_type=cfg.strategy.stage_ma_type,
+                )
+                box_params = dv.BoxParams(
+                    box_high_lookback=cfg.strategy.box_high_lookback,
+                    box_high_confirm=cfg.strategy.box_high_confirm,
+                    box_height_max_pct=cfg.strategy.box_height_max_pct,
+                    box_valid_min_days=cfg.strategy.box_valid_min_days,
+                    box_stale_days=cfg.strategy.box_stale_days,
+                    breakout_buffer=cfg.strategy.breakout_buffer,
+                    breakout_volume_mult=cfg.strategy.breakout_volume_mult,
+                )
+
+                tail = st.slider(
+                    "차트 기간 (영업일)", min_value=60, max_value=486, value=252, step=10,
+                    key=f"tail_{selected_ticker}",
+                    help="60 = 약 3개월, 252 = 1년, 486 = 2년 (백필 한도). 추세 길게 보려면 큰 값.",
+                )
+                fig = build_detail_chart(
+                    bars, name=f"{selected_ticker} {sel_name}",
+                    tail=tail, stage_params=stage_params, box_params=box_params,
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+                # 미네비니 8조건 패널
+                wl_row = flt[flt["ticker"] == selected_ticker]
+                if not wl_row.empty:
+                    wl = wl_row.iloc[0]
+                    with st.expander("미네비니 8조건 + 진단 (마우스 오버로 의미 확인)", expanded=True):
+                        st.caption(
+                            "Mark Minervini의 *Trade Like a Stock Market Wizard*에서 추출한 "
+                            "Trend Template. 8개 모두 통과한 종목만 BUY 후보로 인정."
+                        )
+                        rs_v = float(wl["rs_rank"])
+                        t = tmpl.check_template(
+                            bars["close"].astype(float), rs_v,
+                            sma200_slope_lookback=cfg.strategy.sma200_slope_lookback,
+                            rs_rank_min=float(cfg.strategy.rs_rank_min),
+                            high_series=bars["high"].astype(float) if "high" in bars.columns else None,
+                            low_series=bars["low"].astype(float) if "low" in bars.columns else None,
+                        )
+                        rows = [
+                            {"조건": title, "의미": desc, "통과": "✅" if c else "❌"}
+                            for (title, _ko, desc), c in zip(g.MINERVINI_CONDITIONS, t.checks)
+                        ]
+                        st.dataframe(
+                            pd.DataFrame(rows), use_container_width=True, hide_index=True,
+                            column_config={
+                                "조건": st.column_config.TextColumn("조건", width="medium"),
+                                "의미": st.column_config.TextColumn("의미 (한 줄)", width="large"),
+                                "통과": st.column_config.TextColumn("통과", width="small"),
+                            },
+                        )
+
+                        st.markdown(
+                            f"**진입 가이드** — 종가 `{wl['close']:,.0f}` · "
+                            f"권장 손절 `{wl['suggested_stop']:,.0f}` · "
+                            f"박스 `{wl['box_state']}` (top {wl['box_top']} / bottom {wl['box_bottom']})"
+                        )
+                        st.caption(
+                            "💡 권장 손절은 박스 바닥 또는 종가 -7% 중 하나. "
+                            "실제 진입가·손절가는 차트 보고 본인이 결정."
+                        )
+            else:
+                st.warning("선택한 종목의 bars 데이터를 찾을 수 없습니다.")
+        else:
+            st.info("좌측 워치리스트에서 종목을 선택하면 차트가 나타납니다.")
+
+    # ---------- 하단: 박스 돌파 + RS 분포 ----------
+    st.divider()
+    b1, b2 = st.columns([0.5, 0.5])
+
+    with b1:
+        st.subheader("⭐ 오늘 박스 돌파")
+        st.caption("Darvas 박스 천장 + 0.3% 위로 종가 돌파. 즉시 검토 대상.")
+        if new_buys_df.empty:
+            st.info("오늘 박스 돌파 종목 없음")
+        else:
+            nb_disp = new_buys_df[["ticker", "name", "market", "rs_rank", "entry_guide",
+                                    "stop", "box_top", "box_bottom", "days_in_box",
+                                    "volume_ratio", "is_gap_breakout"]].copy()
+            nb_disp["rs_rank"] = nb_disp["rs_rank"].round(1)
+            nb_disp["volume_ratio"] = nb_disp["volume_ratio"].round(2)
+            st.dataframe(
+                nb_disp, use_container_width=True, hide_index=True,
+                column_config={
+                    "ticker": st.column_config.TextColumn("종목", help=g.COL_TICKER),
+                    "name": st.column_config.TextColumn("이름"),
+                    "market": st.column_config.TextColumn("시장"),
+                    "rs_rank": st.column_config.NumberColumn("RS", format="%.1f", help=g.COL_RS_RANK),
+                    "entry_guide": st.column_config.NumberColumn("진입가", format="%,d",
+                                                                  help="박스 천장 × 1.003 (참고)"),
+                    "stop": st.column_config.NumberColumn("손절", format="%,d",
+                                                           help="박스 바닥 — 이 아래로 종가 마감 시 청산"),
+                    "box_top": st.column_config.NumberColumn("box top", format="%,d"),
+                    "box_bottom": st.column_config.NumberColumn("box bot", format="%,d"),
+                    "days_in_box": st.column_config.NumberColumn("box일", format="%d",
+                                                                  help=g.COL_DAYS_IN_BOX),
+                    "volume_ratio": st.column_config.NumberColumn("vol×", format="%.2f",
+                                                                   help=g.COL_VOLUME_RATIO),
+                    "is_gap_breakout": st.column_config.CheckboxColumn("gap", help=g.COL_IS_GAP),
+                },
+            )
+
+    with b2:
+        st.subheader("RS rank 분포 (워치리스트)")
+        st.caption("같은 시장(KOSPI 또는 KOSDAQ) 내 종목들의 상대 강도 백분위 0~100.")
+        if not watchlist_df.empty:
+            st.plotly_chart(
+                build_rs_distribution(watchlist_df["rs_rank"]),
+                use_container_width=True,
+            )
+
+    st.caption(
+        "⚠️ 이 대시보드는 종목 *추천*만 합니다. 진입 가격·시점·수량은 사용자가 차트를 보고 직접 결정. "
+        "백테스트 결과는 자동매매 가정 하의 *상한선* 추정으로 실제 결과와 다릅니다."
+    )
