@@ -119,8 +119,24 @@ PR13에서 정의한 시그너처가 *forward return*과 연관 있는지 event 
 - ✅ **mean reversion이 momentum보다 강한 universe** — 우리 mcap≥$300M US 시장에서
   신고가 근처 상승은 *모멘텀 소진*, 저가 반등은 *기술적 반등*.
 
-**남은 의문**: KR 시장도 같은가? 다른 timeframe(t+5d / +60d)에선? 어떤 *조합*이 진짜인가?
-이건 PR16 (RSI / Bollinger / ATR / VCP 등 추가 이론 검증)에서 확인.
+**PR16 추가 검증 — Mean reversion 다른 angle (US 2년)**
+
+| Predictor | n | t+20d edge | t+60d edge | 가설 |
+|---|---|---|---|---|
+| **Pullback ≥30%** | 22k | **+562 bps** | **+1,894 bps** | Buy-the-dip 극단 |
+| ATR-move ≥3 (이상치) | 2.3k | +142 bps | +986 bps | Anomaly (U-shape) |
+| ATR-move <0.5 (잠잠) | 90k | +128 bps | +434 bps | Anomaly (U-shape) |
+| RSI<30 (oversold) | 3.6k | +45 bps | +365 bps | 고전 MR ✅ |
+| BB 0.2-0.5 (하단~중간) | 66k | +27 bps | +177 bps | BB MR ✅ |
+| Pullback 0-5% (신고가) | 115k | **-103 bps** | **-304 bps** | momentum 소진 |
+
+**핵심 결론**:
+- 🥇 **Pullback이 PR14의 52w high far보다 더 정밀한 predictor** (+562 vs +228 bps).
+- ATR-normalized 1d move = **U-shape** — 잠잠/이상치 양 극단이 alpha, 중간은 노이즈.
+- RSI/BB/Pullback 모두 mean reversion 가설을 *다른 angle*에서 confirmed → robust.
+
+대시보드 우측 테이블에 ⭐Pullback%, RSI(14) 컬럼 추가. 하단 Alpha 필터 사용해
+직접 좁혀볼 것.
 """
 
 GAINERS_TOOLTIP_SIG_TABLE = (
@@ -150,6 +166,42 @@ COL_CLOSE_TO_SMA200 = (
     "종가 ÷ SMA200. 1.0 = SMA 경계. 1.10 = SMA 위 10%. "
     "*현재 추세 위치*를 보여주는 지표지 forward return predictor는 아님 "
     "(백테스트 t+20d edge ±20 bps 이내)."
+)
+
+COL_PULLBACK_PCT = (
+    "50일 고가 대비 종가가 -N% 떨어진 상태. "
+    "0 = 50d 신고가, 15 = 50d 고가 -15%, 30 = -30%. "
+    "**가장 강한 단일 predictor** (백테스트 2년 US): "
+    "≥30% = t+20d +562 bps / t+60d +1894 bps outperform. "
+    "0-5% (신고가 근처) = -103 bps underperform (모멘텀 소진)."
+)
+
+COL_RSI_14 = (
+    "Wilder's RSI(14) — 0~100. <30 oversold, >70 overbought. "
+    "백테스트상 RSI<30 oversold gainers는 t+20d +45 bps, t+60d +365 bps "
+    "outperform — 가설 confirmed 단, 표본 작음 (전체의 ~1%)."
+)
+
+# ============================================================
+# PR16/PR17 — Alpha predictor 필터 툴팁
+# ============================================================
+
+GAINERS_TOOLTIP_PULLBACK_FILTER = (
+    "50일 고가에서 -N% 이상 떨어진 종목만. **백테스트 최강 predictor**: "
+    "Pullback ≥30%일 때 t+20d mean return +9.2% (baseline +3.6%), "
+    "t+60d +31.1% (baseline +12.1%). 변동성 큼 — 분산 매수 권장."
+)
+
+GAINERS_TOOLTIP_RSI_FILTER = (
+    "RSI(14) ≤ N인 종목만. <30 = 일반적 oversold. 백테스트상 RSI<30 oversold "
+    "gainers의 forward return이 약간 outperform (t+60d +365 bps). "
+    "단, +1% 상승 + RSI<30 동시 만족하는 표본이 작음."
+)
+
+GAINERS_TOOLTIP_BB_FILTER = (
+    "Bollinger Band position ≤ N. 0 = 하단 밴드, 0.5 = 중심, 1.0 = 상단. "
+    "낮을수록 하단 근처. 백테스트상 BB 0.2-0.5가 t+60d +177 bps outperform. "
+    "단 BB<0.2 (극단 하단)는 약간 약함 — 0.2~0.5 sweet spot."
 )
 
 # ============================================================

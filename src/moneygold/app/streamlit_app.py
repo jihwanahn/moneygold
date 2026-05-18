@@ -316,8 +316,30 @@ with tab_gainers:
             help="좌측 분포는 전체, 우측 테이블만 BUY ∩ gainers로 좁힘.",
         )
 
-    # 분류 필터 + mean-reversion 필터 (탭 내부, 기본 OFF)
-    st.markdown("**🧪 필터** (백테스트 검증된 사실 기반 — 위 expander 참조)")
+    # ⭐ Alpha predictor 필터 (PR16 백테스트 검증)
+    st.markdown("**⭐ Alpha 필터** (백테스트 검증된 predictor — 위 expander 참조)")
+    afctrl1, afctrl2, afctrl3 = st.columns(3)
+    with afctrl1:
+        min_pullback_pct = st.slider(
+            "50d 고가 -N% 이상 (Pullback)",
+            min_value=0, max_value=50, value=0, step=5,
+            help=g.GAINERS_TOOLTIP_PULLBACK_FILTER,
+        )
+    with afctrl2:
+        max_rsi = st.slider(
+            "RSI ≤ N (oversold)",
+            min_value=20, max_value=100, value=100, step=5,
+            help=g.GAINERS_TOOLTIP_RSI_FILTER,
+        )
+    with afctrl3:
+        max_bb_pos = st.slider(
+            "BB position ≤ N (하단 근처)",
+            min_value=0.0, max_value=1.0, value=1.0, step=0.1,
+            help=g.GAINERS_TOOLTIP_BB_FILTER,
+        )
+
+    # 분류 필터 (PR15 — forward return predict 안 함, 분류용)
+    st.markdown("**🧪 분류 필터** (현재 상태 필터 — forward return 영향 거의 없음)")
     fctrl1, fctrl2, fctrl3 = st.columns([0.3, 0.35, 0.35])
     with fctrl1:
         only_above_sma200 = st.checkbox(
@@ -331,7 +353,7 @@ with tab_gainers:
         )
     with fctrl3:
         min_off_52w_high_pct = st.slider(
-            "⭐ 52w 고가 -N% 이상 (mean reversion)",
+            "52w 고가 -N% 이상 (구버전)",
             min_value=0, max_value=60, value=0, step=5,
             help=g.GAINERS_TOOLTIP_52W_FAR_FILTER,
         )
@@ -342,6 +364,14 @@ with tab_gainers:
 
     # 필터 적용 (df_g_all → df_g). 필터 끄면 동일.
     df_g = df_g_all.copy()
+    # Alpha 필터
+    if min_pullback_pct > 0 and "pullback_from_50d_high" in df_g.columns:
+        df_g = df_g[df_g["pullback_from_50d_high"].fillna(0) >= min_pullback_pct / 100.0]
+    if max_rsi < 100 and "rsi_14" in df_g.columns:
+        df_g = df_g[df_g["rsi_14"].fillna(100) <= max_rsi]
+    if max_bb_pos < 1.0 and "bb_position" in df_g.columns:
+        df_g = df_g[df_g["bb_position"].fillna(1.0) <= max_bb_pos]
+    # 분류 필터
     if only_above_sma200 and "close_to_sma200" in df_g.columns:
         df_g = df_g[df_g["close_to_sma200"].fillna(0) >= 1.0]
     if max_off_52w_high_pct > 0 and "close_to_52w_high" in df_g.columns:
@@ -423,12 +453,19 @@ with tab_gainers:
             else:
                 disp_df = disp_df.sort_values("pct_chg", ascending=False).head(200)
                 disp_df["pct_chg_pct"] = (disp_df["pct_chg"] * 100).round(2)
+                if "pullback_from_50d_high" in disp_df.columns:
+                    disp_df["pullback_pct"] = (disp_df["pullback_from_50d_high"] * 100).round(1)
+                if "rsi_14" in disp_df.columns:
+                    disp_df["rsi_14"] = disp_df["rsi_14"].round(1)
                 if "close_to_sma200" in disp_df.columns:
                     disp_df["close_to_sma200"] = disp_df["close_to_sma200"].round(3)
                 cols = ["ticker", "name", "market", "stage_name", "pct_chg_pct",
-                        "close_to_sma200", "close", "prev_close"]
+                        "pullback_pct", "rsi_14", "close_to_sma200",
+                        "close", "prev_close"]
                 if "is_buy" in disp_df.columns:
                     cols.append("is_buy")
+                # 누락 컬럼 제거
+                cols = [c for c in cols if c in disp_df.columns]
                 col_cfg = {
                     "ticker": st.column_config.TextColumn("종목"),
                     "name": st.column_config.TextColumn("이름"),
@@ -436,6 +473,12 @@ with tab_gainers:
                     "stage_name": st.column_config.TextColumn("Stage",
                         help="0 UNKNOWN / 1 BASING / 2 ADVANCING / 3 TOPPING / 4 DECLINING"),
                     "pct_chg_pct": st.column_config.NumberColumn("상승률%", format="%+.2f"),
+                    "pullback_pct": st.column_config.NumberColumn(
+                        "Pullback% ⭐", format="%.1f", help=g.COL_PULLBACK_PCT,
+                    ),
+                    "rsi_14": st.column_config.NumberColumn(
+                        "RSI(14)", format="%.1f", help=g.COL_RSI_14,
+                    ),
                     "close_to_sma200": st.column_config.NumberColumn(
                         "종가/SMA200", format="%.3f", help=g.COL_CLOSE_TO_SMA200,
                     ),
