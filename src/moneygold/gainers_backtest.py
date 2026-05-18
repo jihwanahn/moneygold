@@ -73,6 +73,8 @@ def _build_ticker_series(
         return None
     b = bars.sort_values("date").reset_index(drop=True)
     close = b["close"].astype(float)
+    high = b["high"].astype(float) if "high" in b.columns else close
+    low = b["low"].astype(float) if "low" in b.columns else close
     vol = b["volume"].astype(float)
 
     # SMA들
@@ -85,6 +87,9 @@ def _build_ticker_series(
     hi52 = close.rolling(window=252, min_periods=252).max()
     lo52 = close.rolling(window=252, min_periods=252).min()
 
+    # 50일 rolling high (pullback 계산용)
+    hi50 = close.rolling(window=50, min_periods=50).max()
+
     # Relative volume: today / avg of prior 19 bars
     # rolling(20).mean() include today. So shift(1).rolling(19).mean() = prior 19 mean.
     avg_vol19_prior = vol.shift(1).rolling(window=19, min_periods=19).mean()
@@ -94,6 +99,14 @@ def _build_ticker_series(
 
     # Stage 분류 (전체 시계열)
     stage_series = stg.classify_stage_series(close, stage_params)
+
+    # PR16: 추가 feature 시계열
+    rsi_series = ind.rsi(close, 14)
+    bb_series = ind.bollinger_position(close, 20, 2.0)
+    atr_series = ind.atr(high, low, close, 14)
+    atr_pct_series = atr_series / close
+    atr_norm_move = pct_chg / atr_pct_series
+    pullback_50d = 1.0 - close / hi50
 
     # Forward returns: close[t+h] / close[t] - 1
     fwd_data = {}
@@ -114,6 +127,11 @@ def _build_ticker_series(
         "sma200_slope": sma200_slope,
         "rvol": vol / avg_vol19_prior,
         "golden_cross": (sma50 > sma200),
+        # PR16
+        "rsi_14": rsi_series,
+        "bb_position": bb_series,
+        "atr_normalized_move": atr_norm_move,
+        "pullback_from_50d_high": pullback_50d,
         **fwd_data,
     })
     out["ticker"] = ticker
@@ -275,8 +293,8 @@ def group_report(
 
 
 def _default_groups(events: pd.DataFrame) -> dict[str, pd.Series | None]:
-    """기본 그룹: Stage / SMA200 / 52w high / golden cross."""
-    return {
+    """기본 그룹: Stage / SMA200 / 52w high / golden cross + PR16 신규 feature buckets."""
+    groups: dict[str, pd.Series | None] = {
         "ALL": None,
         "Stage 2": events["stage"] == stg.STAGE_ADVANCING,
         "Stage 4": events["stage"] == stg.STAGE_DECLINING,
@@ -291,6 +309,32 @@ def _default_groups(events: pd.DataFrame) -> dict[str, pd.Series | None]:
             & (events["close_to_sma200"] >= 1.0)
         ),
     }
+    # --- PR16: RSI / BB / ATR-norm / Pullback buckets ---
+    if "rsi_14" in events.columns:
+        r = events["rsi_14"]
+        groups["RSI<30 (oversold)"] = r < 30
+        groups["RSI 30-50"] = (r >= 30) & (r < 50)
+        groups["RSI 50-70"] = (r >= 50) & (r < 70)
+        groups["RSI≥70 (overbought)"] = r >= 70
+    if "bb_position" in events.columns:
+        b = events["bb_position"]
+        groups["BB<0.2 (하단 근처)"] = b < 0.2
+        groups["BB 0.2-0.5"] = (b >= 0.2) & (b < 0.5)
+        groups["BB 0.5-0.8"] = (b >= 0.5) & (b < 0.8)
+        groups["BB≥0.8 (상단 근처)"] = b >= 0.8
+    if "atr_normalized_move" in events.columns:
+        a = events["atr_normalized_move"]
+        groups["ATR-move <0.5 (잠잠)"] = a < 0.5
+        groups["ATR-move 0.5-1.5 (보통)"] = (a >= 0.5) & (a < 1.5)
+        groups["ATR-move 1.5-3 (big)"] = (a >= 1.5) & (a < 3.0)
+        groups["ATR-move ≥3 (이상치)"] = a >= 3.0
+    if "pullback_from_50d_high" in events.columns:
+        p = events["pullback_from_50d_high"]
+        groups["Pullback 0-5%"] = (p >= 0) & (p < 0.05)
+        groups["Pullback 5-15%"] = (p >= 0.05) & (p < 0.15)
+        groups["Pullback 15-30%"] = (p >= 0.15) & (p < 0.30)
+        groups["Pullback ≥30%"] = p >= 0.30
+    return groups
 
 
 def edge_table(report: pd.DataFrame, baseline: str = "ALL") -> pd.DataFrame:

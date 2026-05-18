@@ -7,7 +7,6 @@ import pytest
 
 from moneygold import indicators as ind
 
-
 # ----------------- SMA / EMA -----------------
 
 def test_sma_basic():
@@ -225,3 +224,65 @@ def test_dist_pct_zero_denominator():
     r = ind.dist_pct(a, b)
     assert pd.isna(r.iloc[0])
     assert r.iloc[1] == pytest.approx(100.0)
+
+
+# ----------------- RSI -----------------
+
+def test_rsi_all_gains_yields_100():
+    """단조 증가 → 모든 손실이 0 → RSI = 100."""
+    s = pd.Series([1.0 + i for i in range(30)])
+    r = ind.rsi(s, 14)
+    assert r.iloc[-1] == 100.0
+
+
+def test_rsi_all_losses_yields_0():
+    """단조 감소 → 모든 이익이 0 → RSI = 0."""
+    s = pd.Series([100.0 - i for i in range(30)])
+    r = ind.rsi(s, 14)
+    assert r.iloc[-1] == 0.0
+
+
+def test_rsi_short_period_nan():
+    s = pd.Series([100.0] * 5)
+    r = ind.rsi(s, 14)
+    assert pd.isna(r.iloc[-1])
+
+
+def test_rsi_range_bounded():
+    """RSI는 0~100 사이."""
+    rng = np.random.default_rng(42)
+    s = pd.Series(100.0 + rng.standard_normal(100).cumsum())
+    r = ind.rsi(s, 14).dropna()
+    assert (r >= 0).all() and (r <= 100).all()
+
+
+# ----------------- Bollinger Bands position -----------------
+
+def test_bollinger_position_flat_series_nan():
+    """가격 평탄 (std=0)이면 width=0, NaN."""
+    s = pd.Series([100.0] * 30)
+    bp = ind.bollinger_position(s, 20, 2.0)
+    assert pd.isna(bp.iloc[-1])
+
+
+def test_bollinger_position_close_to_upper_band():
+    """상단 밴드 근처 가격 → bb_pos ≈ 1."""
+    # 평균 100, std ~5에서 마지막 봉이 ~110으로 튐
+    s = pd.Series([100.0 + ((-1) ** i) * 5 for i in range(20)] + [110.0])
+    bp = ind.bollinger_position(s, 20, 2.0)
+    val = bp.iloc[-1]
+    assert val > 0.8
+
+
+def test_bollinger_position_close_to_lower_band():
+    """하단 밴드 근처 → bb_pos ≈ 0."""
+    s = pd.Series([100.0 + ((-1) ** i) * 5 for i in range(20)] + [90.0])
+    bp = ind.bollinger_position(s, 20, 2.0)
+    val = bp.iloc[-1]
+    assert val < 0.2
+
+
+def test_bollinger_position_short_period_nan():
+    s = pd.Series([100.0] * 10)
+    bp = ind.bollinger_position(s, 20, 2.0)
+    assert pd.isna(bp.iloc[-1])

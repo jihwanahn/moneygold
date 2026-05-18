@@ -156,6 +156,8 @@ def _compute_features(bars: pd.DataFrame, asof: str) -> dict | None:
     if len(b) < 252:
         return None
     close = b["close"].astype(float)
+    high = b["high"].astype(float) if "high" in b.columns else close
+    low = b["low"].astype(float) if "low" in b.columns else close
     vol = b["volume"].astype(float)
     today = close.iloc[-1]
     if today <= 0:
@@ -175,6 +177,16 @@ def _compute_features(bars: pd.DataFrame, asof: str) -> dict | None:
     avg_vol19 = float(vol.tail(20).iloc[:-1].mean()) if len(vol) >= 20 else float("nan")
     rvol = float(vol.iloc[-1] / avg_vol19) if avg_vol19 and avg_vol19 > 0 else float("nan")
 
+    # PR16 추가: Mean reversion / anomaly / pullback features
+    rsi_14 = ind.rsi(close, 14).iloc[-1]
+    bb_pos = ind.bollinger_position(close, 20, 2.0).iloc[-1]
+    atr14 = ind.atr(high, low, close, 14).iloc[-1]
+    pct_chg = (today / float(close.iloc[-2]) - 1.0) if len(close) >= 2 and close.iloc[-2] > 0 else float("nan")
+    atr_pct = float(atr14 / today) if pd.notna(atr14) and today > 0 else float("nan")
+    atr_norm_move = float(pct_chg / atr_pct) if atr_pct and atr_pct > 0 and pd.notna(pct_chg) else float("nan")
+    hi50 = float(close.tail(50).max()) if len(close) >= 50 else float("nan")
+    pullback_50d = float(1.0 - today / hi50) if hi50 and hi50 > 0 else float("nan")
+
     def _div(n: float, d: float) -> float:
         return float(n / d) if d and not pd.isna(d) and d > 0 else float("nan")
 
@@ -188,6 +200,11 @@ def _compute_features(bars: pd.DataFrame, asof: str) -> dict | None:
         "sma200_slope": float(sma200_slope) if pd.notna(sma200_slope) else float("nan"),
         "rvol": rvol,
         "golden_cross": bool(sma50 > sma200) if pd.notna(sma50) and pd.notna(sma200) else False,
+        # PR16 신규
+        "rsi_14": float(rsi_14) if pd.notna(rsi_14) else float("nan"),
+        "bb_position": float(bb_pos) if pd.notna(bb_pos) else float("nan"),
+        "atr_normalized_move": atr_norm_move,
+        "pullback_from_50d_high": pullback_50d,
     }
 
 
@@ -223,6 +240,8 @@ def attach_features(
         "close_to_sma50", "close_to_sma150", "close_to_sma200",
         "close_to_52w_high", "close_to_52w_low",
         "sma50_over_sma200", "sma200_slope", "rvol", "golden_cross",
+        # PR16
+        "rsi_14", "bb_position", "atr_normalized_move", "pullback_from_50d_high",
     ]
     rows: list[dict] = []
     for tk in gainers_df["ticker"]:

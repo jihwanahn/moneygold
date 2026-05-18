@@ -13,7 +13,6 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-
 # ============================================================
 # Moving averages
 # ============================================================
@@ -56,6 +55,48 @@ def rolling_high(high: pd.Series, n: int) -> pd.Series:
 def rolling_low(low: pd.Series, n: int) -> pd.Series:
     """롤링 윈도우 내 최저가."""
     return low.rolling(window=n, min_periods=n).min()
+
+
+def rsi(close: pd.Series, n: int = 14) -> pd.Series:
+    """Wilder's RSI (Relative Strength Index).
+
+    RSI = 100 - 100 / (1 + RS) where RS = mean(gain_n) / mean(loss_n)
+    using Wilder smoothing (EWMA with alpha = 1/n, equivalent to SMA-seed +
+    EMA), 0~100 범위. <30 = oversold, >70 = overbought 가 일반 해석.
+    """
+    if n <= 0:
+        raise ValueError(f"n must be positive, got {n}")
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = (-delta).clip(lower=0)
+    avg_gain = gain.ewm(alpha=1.0 / n, adjust=False, min_periods=n).mean()
+    avg_loss = loss.ewm(alpha=1.0 / n, adjust=False, min_periods=n).mean()
+    rs = avg_gain / avg_loss
+    out = 100 - 100 / (1 + rs)
+    # avg_loss=0인 경우 rs=inf → out=100, NaN 처리
+    out = out.where(avg_loss > 0, 100.0).where(avg_gain.notna() & avg_loss.notna(), float("nan"))
+    return out
+
+
+def bollinger_position(close: pd.Series, n: int = 20, k: float = 2.0) -> pd.Series:
+    """Bollinger Bands 내 종가 위치를 [0, 1]로 정규화.
+
+    bb_pos = (close - lower) / (upper - lower)
+    where upper = SMA(n) + k*std(n), lower = SMA(n) - k*std(n).
+
+    0 = 하단 밴드, 0.5 = 중심선(SMA), 1 = 상단 밴드. >1/<0이면 밴드 이탈.
+    std=0 (가격 평탄)이면 NaN.
+    """
+    if n <= 0:
+        raise ValueError(f"n must be positive, got {n}")
+    mid = close.rolling(window=n, min_periods=n).mean()
+    std = close.rolling(window=n, min_periods=n).std(ddof=0)
+    upper = mid + k * std
+    lower = mid - k * std
+    width = upper - lower
+    out = (close - lower) / width
+    out = out.where(width > 0, float("nan"))
+    return out
 
 
 # ============================================================
@@ -135,7 +176,7 @@ def rs_momentum(
     if last == 0 or pd.isna(last):
         return float("nan")
     weighted = 0.0
-    for p, w in zip(periods, weights):
+    for p, w in zip(periods, weights, strict=False):
         prev = float(close.iloc[-p - 1])
         if prev == 0 or pd.isna(prev):
             return float("nan")

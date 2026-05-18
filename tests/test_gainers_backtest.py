@@ -192,6 +192,45 @@ def test_group_report_separates_stage(tmp_path: Path):
     assert s4["win_rate"].iloc[0] == 0.0
 
 
+def test_collect_events_includes_pr16_features(tmp_path: Path):
+    """PR16 신규 feature 컬럼이 이벤트 DataFrame에 포함되는지."""
+    closes = [100.0 + i * 0.1 for i in range(280)]
+    closes[-1] = closes[-2] * 1.05
+    _write_master(tmp_path, [{"ticker": "AAA", "market": "US", "name": ""}])
+    _write_bars(tmp_path, "AAA", closes)
+    out = gb.collect_events(
+        tmp_path, start="20250000", end="20259999",
+        min_pct=0.02, horizons=(1,), progress=False,
+    )
+    assert not out.empty
+    for col in ["rsi_14", "bb_position", "atr_normalized_move", "pullback_from_50d_high"]:
+        assert col in out.columns, f"missing {col} from events"
+
+
+def test_default_groups_has_pr16_buckets():
+    """_default_groups가 RSI/BB/ATR/Pullback bucket을 포함하는지."""
+    events = pd.DataFrame({
+        "stage": [2, 4],
+        "close_to_sma200": [1.2, 0.7],
+        "close_to_52w_high": [0.95, 0.5],
+        "golden_cross": [True, False],
+        "rsi_14": [60.0, 25.0],
+        "bb_position": [0.7, 0.1],
+        "atr_normalized_move": [1.0, 2.5],
+        "pullback_from_50d_high": [0.02, 0.20],
+    })
+    groups = gb._default_groups(events)
+    # 새 bucket 라벨 존재 확인
+    new_labels = [
+        "RSI<30 (oversold)", "RSI≥70 (overbought)",
+        "BB<0.2 (하단 근처)", "BB≥0.8 (상단 근처)",
+        "ATR-move <0.5 (잠잠)", "ATR-move ≥3 (이상치)",
+        "Pullback 0-5%", "Pullback ≥30%",
+    ]
+    for label in new_labels:
+        assert label in groups, f"missing group: {label}"
+
+
 def test_edge_table_baseline_difference():
     rpt = pd.DataFrame([
         {"group": "ALL", "horizon_d": 5, "n": 100, "mean": 0.01,

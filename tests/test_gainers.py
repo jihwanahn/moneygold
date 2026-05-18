@@ -263,6 +263,36 @@ def test_attach_features_short_bars_returns_nan(tmp_path: Path):
     assert bool(out["golden_cross"].iloc[0]) is False
 
 
+def test_attach_features_new_columns_present(tmp_path: Path):
+    """PR16 신규 feature 4개가 모두 attach 되는지."""
+    _write_uptrend_bars(tmp_path, "UP")
+    _write_master(tmp_path, [{"ticker": "UP", "market": "US", "name": ""}])
+    g = gainers.daily_gainers(tmp_path, asof="20250299", min_pct=0.0)
+    out = gainers.attach_features(g, tmp_path, asof="20250299")
+    for col in ["rsi_14", "bb_position", "atr_normalized_move", "pullback_from_50d_high"]:
+        assert col in out.columns, f"missing {col}"
+        # 단조 상승 ticker는 모든 값 정의되어야 함
+        assert not pd.isna(out[col].iloc[0]), f"{col} NaN on uptrend"
+
+
+def test_attach_features_rsi_high_on_uptrend(tmp_path: Path):
+    """단조 상승 → RSI 거의 100."""
+    _write_uptrend_bars(tmp_path, "UP")
+    _write_master(tmp_path, [{"ticker": "UP", "market": "US", "name": ""}])
+    g = gainers.daily_gainers(tmp_path, asof="20250299", min_pct=0.0)
+    out = gainers.attach_features(g, tmp_path, asof="20250299")
+    assert out["rsi_14"].iloc[0] > 90
+
+
+def test_attach_features_pullback_zero_on_uptrend(tmp_path: Path):
+    """단조 상승 → 50d 고가 = 오늘 → pullback ≈ 0."""
+    _write_uptrend_bars(tmp_path, "UP")
+    _write_master(tmp_path, [{"ticker": "UP", "market": "US", "name": ""}])
+    g = gainers.daily_gainers(tmp_path, asof="20250299", min_pct=0.0)
+    out = gainers.attach_features(g, tmp_path, asof="20250299")
+    assert abs(out["pullback_from_50d_high"].iloc[0]) < 1e-6
+
+
 def test_signature_table_groups_by_stage(tmp_path: Path):
     """signature_table — Stage 코드별 median 분리."""
     df = pd.DataFrame({
