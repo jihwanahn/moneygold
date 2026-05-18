@@ -119,6 +119,33 @@ PR13에서 정의한 시그너처가 *forward return*과 연관 있는지 event 
 - ✅ **mean reversion이 momentum보다 강한 universe** — 우리 mcap≥$300M US 시장에서
   신고가 근처 상승은 *모멘텀 소진*, 저가 반등은 *기술적 반등*.
 
+**PR19 시장별 검증 — Alpha는 *시장*별로 다르다 (US / KOSPI / KOSDAQ, 2년)**
+
+| Predictor | 🇺🇸 US edge | 🇰🇷 KOSPI edge | 🇰🇷 KOSDAQ edge | 일관성 |
+|---|---|---|---|---|
+| Pullback ≥30% | **+562 bps** | -291 bps | -18 bps | US-only ❌ |
+| 52w high far (<0.7) | +228 bps | -166 bps | t+60d -474 bps | US-only ❌ |
+| 52w high near (≥0.9) | -101 bps | -42 bps | t+60d **+419 bps** | KOSDAQ momentum |
+| Stage 2 | -9 bps | +12 bps | t+60d +168 bps | KR-only momentum |
+| Golden cross | -17 bps | +12 bps | t+60d +150 bps | KR-only momentum |
+| ATR-move <0.5 (잠잠) | +128 bps | -60 bps | -43 bps | US-only ❌ |
+| **🌐 ATR-move ≥3 (이상치)** | +142 bps | **+419 bps** | +180 bps | **공통** ✅ |
+| **🌐 RSI<30 (oversold)** | +45 bps | **+185 bps** | +164 bps | **공통** ✅ |
+
+**시장별 권장 사용**:
+
+- **🇺🇸 US (mcap≥$300M)** → mean reversion 우세. *최강 조합* = Pullback ≥30% + ATR<0.5.
+  *위험*: 신고가 근처 / SMA200 위 / Golden cross는 underperform (모멘텀 소진).
+- **🇰🇷 KOSPI/KOSDAQ** → momentum 우세 (특히 KOSDAQ). *권장* = Stage 2 + 52w high near
+  + Golden cross. *위험*: Pullback ≥30% / 52w far는 *진짜 약세* (회복 못함).
+- **🌐 3개 시장 공통** = RSI<30 (oversold) + ATR-normalized 이상치 (≥3). 시장 무관
+  anomaly bounce는 어디서나 작동.
+
+**해석**: US는 mid/large cap mean reversion 시장, KR은 (특히 KOSDAQ 소형주) momentum
+시장. 대시보드 사이드바에서 시장 선택 후 필터 조정 권장 — *시장별로 다른 전략*.
+
+---
+
 **PR18 조합 검증 — 최강 실용 조합**
 
 Pullback ≥30%에 다른 predictor를 *교집합*해서 어떤 조합이 alpha를 강화하는가 (US 2년):
