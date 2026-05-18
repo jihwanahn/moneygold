@@ -179,6 +179,111 @@ def test_stage_distribution_all_codes_present():
     assert abs(out["pct"].sum() - 100.0) < 1e-9
 
 
+# --- attach_features ----------------------------------------------------------
+
+def _write_uptrend_bars(data_dir: Path, ticker: str, n: int = 300, start: float = 100.0, slope: float = 0.5) -> None:
+    """선형 상승 추세 봉 n개. 마지막 봉이 가장 큼."""
+    rows = []
+    for i in range(n):
+        price = start + i * slope
+        rows.append({
+            "ticker": ticker,
+            "date": f"2025{i:04d}",
+            "open": price, "high": price * 1.005, "low": price * 0.995,
+            "close": price,
+            "volume": 100_000 + (i % 5) * 1000,
+            "value": int(price * 100_000),
+            "adj_factor": 1.0,
+        })
+    df = pd.DataFrame(rows)
+    store.write_parquet_atomic(df, store.bars_path(data_dir, ticker))
+
+
+def _write_downtrend_bars(data_dir: Path, ticker: str, n: int = 300, start: float = 200.0, slope: float = -0.4) -> None:
+    """선형 하락 추세 봉 n개. 마지막 봉은 살짝 위로 튐(데드캣 시뮬)."""
+    rows = []
+    for i in range(n):
+        price = start + i * slope
+        if i == n - 1:
+            # 마지막 봉: 직전 대비 +3%
+            prev = rows[-1]["close"]
+            price = prev * 1.03
+        rows.append({
+            "ticker": ticker,
+            "date": f"2025{i:04d}",
+            "open": price, "high": price * 1.005, "low": price * 0.995,
+            "close": price,
+            "volume": 100_000,
+            "value": int(price * 100_000),
+            "adj_factor": 1.0,
+        })
+    df = pd.DataFrame(rows)
+    store.write_parquet_atomic(df, store.bars_path(data_dir, ticker))
+
+
+def test_attach_features_uptrend_signatures(tmp_path: Path):
+    """SMA200 위, 52w 고가 근처, golden cross — Stage 2 시그너처."""
+    _write_uptrend_bars(tmp_path, "UP")
+    _write_master(tmp_path, [{"ticker": "UP", "market": "US", "name": "Up Co"}])
+    g = gainers.daily_gainers(tmp_path, asof="20250299", min_pct=0.0)
+    out = gainers.attach_features(g, tmp_path, asof="20250299")
+    row = out.iloc[0]
+    assert row["close_to_sma200"] > 1.10
+    assert row["close_to_52w_high"] > 0.98  # 단조 상승 → 마지막 봉이 52w 고가
+    assert row["sma50_over_sma200"] > 1.0
+    assert bool(row["golden_cross"]) is True
+    assert row["sma200_slope"] > 0
+
+
+def test_attach_features_downtrend_with_bounce(tmp_path: Path):
+    """SMA 우하향 + 마지막에 튐 — Stage 4 데드캣 시그너처."""
+    _write_downtrend_bars(tmp_path, "DOWN")
+    _write_master(tmp_path, [{"ticker": "DOWN", "market": "US", "name": "Down Co"}])
+    g = gainers.daily_gainers(tmp_path, asof="20250299", min_pct=0.01)
+    out = gainers.attach_features(g, tmp_path, asof="20250299")
+    row = out.iloc[0]
+    # 단조 하락 + 마지막만 튐 → 종가는 SMA200 아래
+    assert row["close_to_sma200"] < 1.0
+    # 52w 고가는 한참 위
+    assert row["close_to_52w_high"] < 0.8
+    # Dead cross
+    assert row["sma50_over_sma200"] < 1.0
+    assert bool(row["golden_cross"]) is False
+    assert row["sma200_slope"] < 0
+
+
+def test_attach_features_short_bars_returns_nan(tmp_path: Path):
+    """252봉 미만이면 모든 feature NaN."""
+    closes = {f"2025{i:04d}": 100.0 + i for i in range(100)}
+    _write_master(tmp_path, [{"ticker": "SHORT", "market": "US", "name": ""}])
+    _write_bars(tmp_path, "SHORT", closes)
+    g = gainers.daily_gainers(tmp_path, asof=f"2025{99:04d}", min_pct=0.0)
+    out = gainers.attach_features(g, tmp_path, asof=f"2025{99:04d}")
+    assert pd.isna(out["close_to_sma200"].iloc[0])
+    assert bool(out["golden_cross"].iloc[0]) is False
+
+
+def test_signature_table_groups_by_stage(tmp_path: Path):
+    """signature_table — Stage 코드별 median 분리."""
+    df = pd.DataFrame({
+        "ticker": ["A", "B", "C", "D"],
+        "stage": [2, 2, 4, 4],
+        "rvol": [1.0, 2.0, 0.5, 1.5],
+        "close_to_sma200": [1.2, 1.3, 0.7, 0.8],
+        "close_to_52w_high": [0.9, 0.95, 0.5, 0.6],
+        "close_to_sma50": [1.0, 1.1, 0.9, 1.0],
+        "close_to_sma150": [1.1, 1.2, 0.8, 0.9],
+        "close_to_52w_low": [1.5, 1.7, 1.1, 1.2],
+        "sma50_over_sma200": [1.1, 1.2, 0.8, 0.85],
+        "sma200_slope": [0.001, 0.002, -0.001, -0.002],
+    })
+    out = gainers.signature_table(df)
+    assert set(out.columns) == {2, 4}
+    assert abs(out.loc["close_to_sma200", 2] - 1.25) < 1e-9
+    assert abs(out.loc["close_to_sma200", 4] - 0.75) < 1e-9
+    assert out.loc["close_to_sma200", 2] > out.loc["close_to_sma200", 4]
+
+
 def test_daily_gainers_asof_reproducibility(tmp_path: Path):
     """과거 asof로 호출 시 그 시점 기준으로 계산 (오늘 데이터 무시)."""
     _write_master(tmp_path, [{"ticker": "AAA", "market": "US", "name": ""}])

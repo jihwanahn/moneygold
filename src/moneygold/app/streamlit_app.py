@@ -275,12 +275,14 @@ tab_main, tab_gainers = st.tabs(["📋 BUY 후보", "📈 오늘 상승"])
 
 @st.cache_data(show_spinner="오늘 상승 종목 분석 중…")
 def _gainers_with_stage_cached(_data_dir_str: str, asof: str, min_pct: float) -> pd.DataFrame:
-    """daily_gainers + attach_stage 합쳐 캐시. min_pct 0이면 모든 상승 종목."""
+    """daily_gainers + attach_stage + attach_features 캐시. min_pct 0이면 모든 상승 종목."""
     from moneygold import gainers as _gn
     df_g = _gn.daily_gainers(Path(_data_dir_str), asof=asof, min_pct=min_pct)
     if df_g.empty:
         return df_g
-    return _gn.attach_stage(df_g, Path(_data_dir_str), asof=asof)
+    df_g = _gn.attach_stage(df_g, Path(_data_dir_str), asof=asof)
+    df_g = _gn.attach_features(df_g, Path(_data_dir_str), asof=asof)
+    return df_g
 
 
 with tab_gainers:
@@ -292,6 +294,8 @@ with tab_gainers:
 
     with st.expander("❓ 이 탭의 의미 (처음 보는 경우)", expanded=False):
         st.markdown(g.GAINERS_TAB_INTRO)
+        st.markdown("---")
+        st.markdown(g.GAINERS_SIGNATURE_INTRO)
 
     gctrl1, gctrl2, gctrl3 = st.columns([0.3, 0.4, 0.3])
     with gctrl1:
@@ -312,11 +316,32 @@ with tab_gainers:
             help="좌측 분포는 전체, 우측 테이블만 BUY ∩ gainers로 좁힘.",
         )
 
-    df_g = _gainers_with_stage_cached(data_dir_str, asof_str, gainers_pct / 100.0)
-    if gainers_markets:
-        df_g = df_g[df_g["market"].isin(gainers_markets)]
+    # 시그너처 기반 noise 컷 필터 (탭 내부)
+    fctrl1, fctrl2 = st.columns([0.4, 0.6])
+    with fctrl1:
+        only_above_sma200 = st.checkbox(
+            "SMA200 위만 (Stage 4 자동 제거)", value=False,
+            help=g.GAINERS_TOOLTIP_SMA200_FILTER,
+        )
+    with fctrl2:
+        max_off_52w_high_pct = st.slider(
+            "52w 고가 -N% 이내 (0 = 비활성)", min_value=0, max_value=60, value=0, step=5,
+            help=g.GAINERS_TOOLTIP_52W_FILTER,
+        )
 
-    if df_g.empty:
+    df_g_all = _gainers_with_stage_cached(data_dir_str, asof_str, gainers_pct / 100.0)
+    if gainers_markets:
+        df_g_all = df_g_all[df_g_all["market"].isin(gainers_markets)]
+
+    # 시그너처 필터 적용 (df_g_all → df_g). 필터 끄면 동일.
+    df_g = df_g_all.copy()
+    if only_above_sma200 and "close_to_sma200" in df_g.columns:
+        df_g = df_g[df_g["close_to_sma200"].fillna(0) >= 1.0]
+    if max_off_52w_high_pct > 0 and "close_to_52w_high" in df_g.columns:
+        thr = 1.0 - max_off_52w_high_pct / 100.0
+        df_g = df_g[df_g["close_to_52w_high"].fillna(0) >= thr]
+
+    if df_g_all.empty:
         st.info(f"asof {asof_str} 기준 +{gainers_pct:.1f}% 이상 상승 종목이 없습니다.")
     else:
         # 메트릭
@@ -324,34 +349,53 @@ with tab_gainers:
         buy_set = set(watchlist_df["ticker"]) if not watchlist_df.empty else set()
         inter_df = df_g[df_g["ticker"].isin(buy_set)]
         stage2_df = df_g[df_g["stage"] == stg.STAGE_ADVANCING]
-        m1.metric("상승 종목", len(df_g),
-                  help=f"+{gainers_pct:.1f}% 이상 종목 수.")
+        m1.metric("상승 종목 (필터 후)", len(df_g),
+                  delta=f"{len(df_g) - len(df_g_all):+d}" if len(df_g) != len(df_g_all) else None,
+                  help=f"+{gainers_pct:.1f}% 이상 종목 수. delta = 시그너처 필터로 제거된 양.")
         m2.metric("Stage 2 (ADVANCING)", len(stage2_df),
                   help="진짜 추세 지속 가능성. SMA150 위 + 상승 기울기.")
         m3.metric("Stage 4 (DECLINING)",
                   int((df_g["stage"] == stg.STAGE_DECLINING).sum()),
                   help="하락 추세 안에서의 반등 — 데드캣 바운스 가능성.")
         m4.metric("BUY ∩ 상승", len(inter_df),
-                  help="워치리스트(Stage2+Template8/8) ∩ 오늘 상승.")
+                  help="워치리스트(Stage2+Template8/8) ∩ 오늘 상승 (필터 후).")
 
         st.divider()
 
         gl, gr = st.columns([0.4, 0.6])
         with gl:
-            st.markdown("**Stage 분포 (오늘 상승 종목)**")
+            st.markdown("**Stage 분포 (필터 후)**")
             st.caption(g.GAINERS_TOOLTIP_STAGE_DIST)
-            dist = gn.stage_distribution(df_g["stage"])
-            chart_df = dist.set_index("stage_name")[["count"]]
-            st.bar_chart(chart_df, height=320, color="#3b82f6")
-            st.dataframe(
-                dist, hide_index=True, use_container_width=True,
-                column_config={
-                    "stage": st.column_config.NumberColumn("Stage", format="%d"),
-                    "stage_name": st.column_config.TextColumn("이름"),
-                    "count": st.column_config.NumberColumn("종목 수", format="%d"),
-                    "pct": st.column_config.NumberColumn("%", format="%.1f"),
-                },
-            )
+            if df_g.empty:
+                st.info("필터 후 남은 종목 없음.")
+            else:
+                dist = gn.stage_distribution(df_g["stage"])
+                chart_df = dist.set_index("stage_name")[["count"]]
+                st.bar_chart(chart_df, height=240, color="#3b82f6")
+
+                # 시그너처 비교표 (필터 전 데이터 기준 — Stage 2/4 차이 보기)
+                st.markdown("**시그너처 비교 (필터 전, Stage별 median)**")
+                st.caption(g.GAINERS_TOOLTIP_SIG_TABLE)
+                # Stage 2, 4 둘 다 있어야 의미 있음
+                sig = gn.signature_table(df_g_all, stage_col="stage")
+                if not sig.empty:
+                    # column 이름을 사람이 읽기 좋게 + Stage 2/4만 우선 표시
+                    rename_idx = {
+                        "rvol": "거래량 (vs 19일)",
+                        "close_to_sma50": "종가/SMA50",
+                        "close_to_sma150": "종가/SMA150",
+                        "close_to_sma200": "종가/SMA200 ⭐",
+                        "close_to_52w_high": "종가/52w 고가 ⭐",
+                        "close_to_52w_low": "종가/52w 저가",
+                        "sma50_over_sma200": "SMA50/SMA200",
+                        "sma200_slope": "SMA200 기울기",
+                    }
+                    sig = sig.rename(index=rename_idx)
+                    sig.columns = [f"Stage {c} {stg.STAGE_NAMES.get(int(c), '?')}"
+                                   for c in sig.columns]
+                    st.dataframe(
+                        sig.round(3), use_container_width=True,
+                    )
 
         with gr:
             if only_buy_intersection:
@@ -361,16 +405,18 @@ with tab_gainers:
             else:
                 disp_df = df_g.copy()
                 disp_df["is_buy"] = disp_df["ticker"].isin(buy_set)
-                st.markdown(f"**오늘 상승 종목 전체 ({len(disp_df)}건)**")
-                st.caption("`is_buy` = 워치리스트 교집합 여부.")
+                st.markdown(f"**오늘 상승 종목 ({len(disp_df)}건, 필터 후)**")
+                st.caption("`is_buy` = 워치리스트 교집합 여부. `종가/SMA200` 컬럼이 1.0 이상이면 Stage 2 후보, 미만이면 Stage 4 의심.")
 
             if disp_df.empty:
                 st.info("해당 조건에 맞는 종목 없음.")
             else:
                 disp_df = disp_df.sort_values("pct_chg", ascending=False).head(200)
                 disp_df["pct_chg_pct"] = (disp_df["pct_chg"] * 100).round(2)
+                if "close_to_sma200" in disp_df.columns:
+                    disp_df["close_to_sma200"] = disp_df["close_to_sma200"].round(3)
                 cols = ["ticker", "name", "market", "stage_name", "pct_chg_pct",
-                        "close", "prev_close"]
+                        "close_to_sma200", "close", "prev_close"]
                 if "is_buy" in disp_df.columns:
                     cols.append("is_buy")
                 col_cfg = {
@@ -380,6 +426,9 @@ with tab_gainers:
                     "stage_name": st.column_config.TextColumn("Stage",
                         help="0 UNKNOWN / 1 BASING / 2 ADVANCING / 3 TOPPING / 4 DECLINING"),
                     "pct_chg_pct": st.column_config.NumberColumn("상승률%", format="%+.2f"),
+                    "close_to_sma200": st.column_config.NumberColumn(
+                        "종가/SMA200", format="%.3f", help=g.COL_CLOSE_TO_SMA200,
+                    ),
                     "close": st.column_config.NumberColumn("종가", format="%,.2f"),
                     "prev_close": st.column_config.NumberColumn("전일", format="%,.2f"),
                 }
