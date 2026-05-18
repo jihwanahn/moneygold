@@ -294,13 +294,14 @@ tab_main, tab_gainers = st.tabs(["📋 BUY 후보", "📈 오늘 상승"])
 
 @st.cache_data(show_spinner="오늘 상승 종목 분석 중…")
 def _gainers_with_stage_cached(_data_dir_str: str, asof: str, min_pct: float) -> pd.DataFrame:
-    """daily_gainers + attach_stage + attach_features 캐시. min_pct 0이면 모든 상승 종목."""
+    """daily_gainers + attach_stage + attach_features + alpha_score 캐시."""
     from moneygold import gainers as _gn
     df_g = _gn.daily_gainers(Path(_data_dir_str), asof=asof, min_pct=min_pct)
     if df_g.empty:
         return df_g
     df_g = _gn.attach_stage(df_g, Path(_data_dir_str), asof=asof)
     df_g = _gn.attach_features(df_g, Path(_data_dir_str), asof=asof)
+    df_g["alpha_score"] = _gn.compute_alpha_score(df_g)
     return df_g
 
 
@@ -313,6 +314,8 @@ with tab_gainers:
 
     with st.expander("❓ 이 탭의 의미 (처음 보는 경우)", expanded=False):
         st.markdown(g.GAINERS_TAB_INTRO)
+        st.markdown("---")
+        st.markdown(g.GAINERS_ALPHA_SCORE_INTRO)
         st.markdown("---")
         st.markdown(g.GAINERS_SIGNATURE_INTRO)
 
@@ -377,6 +380,21 @@ with tab_gainers:
             help=g.GAINERS_TOOLTIP_52W_FAR_FILTER,
         )
 
+    # 📍 Top N 검증된 alpha 후보 toggle — 모든 필터 무시하고 alpha_score 정렬 상위 N개만.
+    st.markdown("**📍 검증된 alpha 후보 (Top N)** — 시장별 자동 가중치, 모든 필터 무시.")
+    pctrl1, pctrl2, _pctrl3 = st.columns([0.3, 0.4, 0.3])
+    with pctrl1:
+        use_alpha_preset = st.checkbox(
+            "Top N alpha 정렬만 보기", value=False,
+            help="시장별로 검증된 alpha_score (US: Pullback+ATR / KR: Stage+momentum)로 정렬, "
+                 "위의 상승률/필터 무시. 한 번 클릭으로 최강 후보 확인.",
+        )
+    with pctrl2:
+        top_n = st.number_input(
+            "Top N", min_value=5, max_value=100, value=10, step=5,
+            help="alpha_score 상위 몇 개를 볼지.",
+        )
+
     df_g_all = _gainers_with_stage_cached(data_dir_str, asof_str, gainers_pct / 100.0)
     if gainers_markets:
         df_g_all = df_g_all[df_g_all["market"].isin(gainers_markets)]
@@ -385,24 +403,27 @@ with tab_gainers:
         _kis_set = set(master[master["tradable_kis"]]["ticker"])
         df_g_all = df_g_all[df_g_all["ticker"].isin(_kis_set)]
 
-    # 필터 적용 (df_g_all → df_g). 필터 끄면 동일.
-    df_g = df_g_all.copy()
-    # Alpha 필터
-    if min_pullback_pct > 0 and "pullback_from_50d_high" in df_g.columns:
-        df_g = df_g[df_g["pullback_from_50d_high"].fillna(0) >= min_pullback_pct / 100.0]
-    if max_rsi < 100 and "rsi_14" in df_g.columns:
-        df_g = df_g[df_g["rsi_14"].fillna(100) <= max_rsi]
-    if max_bb_pos < 1.0 and "bb_position" in df_g.columns:
-        df_g = df_g[df_g["bb_position"].fillna(1.0) <= max_bb_pos]
-    # 분류 필터
-    if only_above_sma200 and "close_to_sma200" in df_g.columns:
-        df_g = df_g[df_g["close_to_sma200"].fillna(0) >= 1.0]
-    if max_off_52w_high_pct > 0 and "close_to_52w_high" in df_g.columns:
-        thr = 1.0 - max_off_52w_high_pct / 100.0
-        df_g = df_g[df_g["close_to_52w_high"].fillna(0) >= thr]
-    if min_off_52w_high_pct > 0 and "close_to_52w_high" in df_g.columns:
-        thr = 1.0 - min_off_52w_high_pct / 100.0
-        df_g = df_g[df_g["close_to_52w_high"].fillna(1.0) <= thr]
+    # 필터 적용 (df_g_all → df_g). preset 모드면 필터 무시하고 alpha_score top N.
+    if use_alpha_preset and "alpha_score" in df_g_all.columns:
+        df_g = df_g_all.sort_values("alpha_score", ascending=False).head(int(top_n)).copy()
+    else:
+        df_g = df_g_all.copy()
+        # Alpha 필터
+        if min_pullback_pct > 0 and "pullback_from_50d_high" in df_g.columns:
+            df_g = df_g[df_g["pullback_from_50d_high"].fillna(0) >= min_pullback_pct / 100.0]
+        if max_rsi < 100 and "rsi_14" in df_g.columns:
+            df_g = df_g[df_g["rsi_14"].fillna(100) <= max_rsi]
+        if max_bb_pos < 1.0 and "bb_position" in df_g.columns:
+            df_g = df_g[df_g["bb_position"].fillna(1.0) <= max_bb_pos]
+        # 분류 필터
+        if only_above_sma200 and "close_to_sma200" in df_g.columns:
+            df_g = df_g[df_g["close_to_sma200"].fillna(0) >= 1.0]
+        if max_off_52w_high_pct > 0 and "close_to_52w_high" in df_g.columns:
+            thr = 1.0 - max_off_52w_high_pct / 100.0
+            df_g = df_g[df_g["close_to_52w_high"].fillna(0) >= thr]
+        if min_off_52w_high_pct > 0 and "close_to_52w_high" in df_g.columns:
+            thr = 1.0 - min_off_52w_high_pct / 100.0
+            df_g = df_g[df_g["close_to_52w_high"].fillna(1.0) <= thr]
 
     if df_g_all.empty:
         st.info(f"asof {asof_str} 기준 +{gainers_pct:.1f}% 이상 상승 종목이 없습니다.")
@@ -474,7 +495,11 @@ with tab_gainers:
             if disp_df.empty:
                 st.info("해당 조건에 맞는 종목 없음.")
             else:
-                disp_df = disp_df.sort_values("pct_chg", ascending=False).head(200)
+                # preset 모드면 alpha_score 정렬 (이미 head(top_n) 적용됨), 아니면 상승률 정렬
+                if use_alpha_preset and "alpha_score" in disp_df.columns:
+                    disp_df = disp_df.sort_values("alpha_score", ascending=False)
+                else:
+                    disp_df = disp_df.sort_values("pct_chg", ascending=False).head(200)
                 disp_df["pct_chg_pct"] = (disp_df["pct_chg"] * 100).round(2)
                 if "pullback_from_50d_high" in disp_df.columns:
                     disp_df["pullback_pct"] = (disp_df["pullback_from_50d_high"] * 100).round(1)
@@ -482,7 +507,8 @@ with tab_gainers:
                     disp_df["rsi_14"] = disp_df["rsi_14"].round(1)
                 if "close_to_sma200" in disp_df.columns:
                     disp_df["close_to_sma200"] = disp_df["close_to_sma200"].round(3)
-                cols = ["ticker", "name", "market", "stage_name", "pct_chg_pct",
+                cols = ["ticker", "name", "market", "alpha_score",
+                        "stage_name", "pct_chg_pct",
                         "pullback_pct", "rsi_14", "close_to_sma200",
                         "close", "prev_close"]
                 if "is_buy" in disp_df.columns:
@@ -493,11 +519,16 @@ with tab_gainers:
                     "ticker": st.column_config.TextColumn("종목"),
                     "name": st.column_config.TextColumn("이름"),
                     "market": st.column_config.TextColumn("시장"),
+                    "alpha_score": st.column_config.NumberColumn(
+                        "Alpha ⭐", format="%.1f",
+                        help="시장별 검증된 가중합 (0-100). US=Pullback+ATR+BB+RSI, "
+                             "KR=Stage+GC+52w high+RSI - Pullback페널티.",
+                    ),
                     "stage_name": st.column_config.TextColumn("Stage",
                         help="0 UNKNOWN / 1 BASING / 2 ADVANCING / 3 TOPPING / 4 DECLINING"),
                     "pct_chg_pct": st.column_config.NumberColumn("상승률%", format="%+.2f"),
                     "pullback_pct": st.column_config.NumberColumn(
-                        "Pullback% ⭐", format="%.1f", help=g.COL_PULLBACK_PCT,
+                        "Pullback%", format="%.1f", help=g.COL_PULLBACK_PCT,
                     ),
                     "rsi_14": st.column_config.NumberColumn(
                         "RSI(14)", format="%.1f", help=g.COL_RSI_14,

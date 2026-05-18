@@ -259,6 +259,60 @@ def attach_features(
     return out
 
 
+def compute_alpha_score(df: pd.DataFrame) -> pd.Series:
+    """시장별 검증된 alpha 가중합 점수 (0~100).
+
+    Backtest (PR16-19) 결과 기반:
+
+    - **US (mean reversion 우세)**: Pullback (+0~50점), ATR-move U-shape
+      (<0.5 +20 / ≥3 +25), BB<0.3 +10, RSI<30 +10.
+    - **KR (momentum 우세)**: Stage 2 +25, Golden cross +15, 52w 고가 거리
+      0~30점, RSI<30 +15, ATR-move ≥3 +15. Pullback은 *페널티* (-0~25점).
+    - market 컬럼 누락 시 모두 KR로 간주.
+
+    Score는 백테스트 edge를 *직접 반영*하지는 않고 (heuristic), 검증된 방향성을
+    가중합으로 표현. 사용자는 이 score 정렬 후 차트로 확인.
+
+    Returns
+    -------
+    pd.Series  dtype=float64, 0~100 clip. feature 누락(NaN) = 해당 항목 0점.
+    """
+    if df.empty:
+        return pd.Series([], dtype=float)
+
+    is_us = (df["market"].astype(str) == "US") if "market" in df.columns else pd.Series(False, index=df.index)
+
+    us_score = pd.Series(0.0, index=df.index)
+    if "pullback_from_50d_high" in df.columns:
+        us_score += df["pullback_from_50d_high"].fillna(0).clip(0, 0.5) * 100  # 0~50
+    if "atr_normalized_move" in df.columns:
+        atr = df["atr_normalized_move"].fillna(1.0)
+        us_score += (atr < 0.5).astype(float) * 20
+        us_score += (atr >= 3.0).astype(float) * 25
+    if "bb_position" in df.columns:
+        us_score += (df["bb_position"].fillna(1.0) < 0.3).astype(float) * 10
+    if "rsi_14" in df.columns:
+        us_score += (df["rsi_14"].fillna(50.0) < 30).astype(float) * 10
+
+    kr_score = pd.Series(0.0, index=df.index)
+    if "stage" in df.columns:
+        kr_score += (df["stage"].fillna(0).astype(int) == 2).astype(float) * 25
+    if "golden_cross" in df.columns:
+        kr_score += df["golden_cross"].fillna(False).astype(bool).astype(float) * 15
+    if "close_to_52w_high" in df.columns:
+        kr_score += df["close_to_52w_high"].fillna(0).clip(0, 1.0) * 30
+    if "rsi_14" in df.columns:
+        kr_score += (df["rsi_14"].fillna(50.0) < 30).astype(float) * 15
+    if "atr_normalized_move" in df.columns:
+        kr_score += (df["atr_normalized_move"].fillna(1.0) >= 3.0).astype(float) * 15
+    # KR penalty: deep pullback은 실제 약세 (백테스트 -291 ~ -399 bps)
+    if "pullback_from_50d_high" in df.columns:
+        kr_score -= df["pullback_from_50d_high"].fillna(0).clip(0, 0.5) * 50
+
+    score = us_score.where(is_us, kr_score)
+    return score.clip(lower=0, upper=100).round(1)
+
+
 def signature_table(features_df: pd.DataFrame, stage_col: str = "stage") -> pd.DataFrame:
     """Stage별 시그너처 비교표 (median).
 

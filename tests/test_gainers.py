@@ -293,6 +293,107 @@ def test_attach_features_pullback_zero_on_uptrend(tmp_path: Path):
     assert abs(out["pullback_from_50d_high"].iloc[0]) < 1e-6
 
 
+def test_compute_alpha_score_us_pullback_drives_score():
+    """US 시장: Pullback ≥30% 단독으로 30~50점."""
+    df = pd.DataFrame({
+        "market": ["US", "US", "US"],
+        "pullback_from_50d_high": [0.0, 0.30, 0.50],
+        "atr_normalized_move": [1.0, 1.0, 1.0],
+        "bb_position": [0.5, 0.5, 0.5],
+        "rsi_14": [50.0, 50.0, 50.0],
+        "stage": [2, 2, 2],
+        "golden_cross": [True, True, True],
+        "close_to_52w_high": [1.0, 1.0, 1.0],
+    })
+    s = gainers.compute_alpha_score(df)
+    assert s.iloc[0] == 0.0
+    assert abs(s.iloc[1] - 30.0) < 0.1   # 30% pullback * 100 = 30
+    assert abs(s.iloc[2] - 50.0) < 0.1   # 50% pullback × 100 = 50 (cap)
+
+
+def test_compute_alpha_score_us_best_combo_high():
+    """US: Pullback 50% + ATR-norm <0.5 + BB<0.3 + RSI<30 = 50+20+10+10 = 90."""
+    df = pd.DataFrame({
+        "market": ["US"],
+        "pullback_from_50d_high": [0.5],
+        "atr_normalized_move": [0.3],
+        "bb_position": [0.2],
+        "rsi_14": [25.0],
+    })
+    s = gainers.compute_alpha_score(df)
+    assert abs(s.iloc[0] - 90.0) < 0.1
+
+
+def test_compute_alpha_score_kr_pullback_penalty():
+    """KR 시장: Pullback ≥30%는 *페널티* (백테스트 검증)."""
+    df = pd.DataFrame({
+        "market": ["KOSPI", "KOSPI"],
+        "pullback_from_50d_high": [0.0, 0.50],
+        "stage": [2, 2],
+        "golden_cross": [True, True],
+        "close_to_52w_high": [1.0, 1.0],
+        "rsi_14": [50.0, 50.0],
+        "atr_normalized_move": [1.0, 1.0],
+    })
+    s = gainers.compute_alpha_score(df)
+    # 0% pullback: Stage 2 (25) + GC (15) + 52w high (30) = 70
+    # 50% pullback: 같은 + 페널티 -25 = 45
+    assert abs(s.iloc[0] - 70.0) < 0.1
+    assert s.iloc[1] < s.iloc[0]
+    assert abs(s.iloc[1] - 45.0) < 0.1
+
+
+def test_compute_alpha_score_kr_stage2_momentum():
+    """KR: Stage 2 + Golden cross + 52w high near = 25+15+30 = 70."""
+    df = pd.DataFrame({
+        "market": ["KOSDAQ"],
+        "stage": [2],
+        "golden_cross": [True],
+        "close_to_52w_high": [1.0],
+        "rsi_14": [50.0],
+        "atr_normalized_move": [1.0],
+        "pullback_from_50d_high": [0.0],
+    })
+    s = gainers.compute_alpha_score(df)
+    assert abs(s.iloc[0] - 70.0) < 0.1
+
+
+def test_compute_alpha_score_clipped_0_100():
+    """모든 보너스 + 모든 페널티 → 0~100 사이로 clip."""
+    # KR 페널티 극단
+    df = pd.DataFrame({
+        "market": ["KOSPI"],
+        "stage": [0],
+        "golden_cross": [False],
+        "close_to_52w_high": [0.0],
+        "rsi_14": [50.0],
+        "atr_normalized_move": [1.0],
+        "pullback_from_50d_high": [1.0],
+    })
+    s = gainers.compute_alpha_score(df)
+    assert 0 <= s.iloc[0] <= 100
+
+
+def test_compute_alpha_score_empty_df():
+    s = gainers.compute_alpha_score(pd.DataFrame())
+    assert s.empty
+
+
+def test_compute_alpha_score_no_market_column_treats_as_kr():
+    """market 컬럼 없으면 모두 KR로 처리."""
+    df = pd.DataFrame({
+        "stage": [2],
+        "golden_cross": [True],
+        "close_to_52w_high": [1.0],
+        "rsi_14": [50.0],
+        "atr_normalized_move": [1.0],
+        "pullback_from_50d_high": [0.0],
+    })
+    s = gainers.compute_alpha_score(df)
+    # KR scoring = 70
+    assert abs(s.iloc[0] - 70.0) < 0.1
+
+
 def test_signature_table_groups_by_stage(tmp_path: Path):
     """signature_table — Stage 코드별 median 분리."""
     df = pd.DataFrame({

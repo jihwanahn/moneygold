@@ -227,6 +227,35 @@ COL_RSI_14 = (
     "outperform — 가설 confirmed 단, 표본 작음 (전체의 ~1%)."
 )
 
+GAINERS_ALPHA_SCORE_INTRO = """
+**Alpha Score (0~100) — 시장별 검증된 가중합**
+
+PR16~19 백테스트에서 검증된 *방향성*을 한 컬럼으로 집약. 시장에 따라 자동으로
+다른 가중치 적용:
+
+**🇺🇸 US (mean reversion 우세)**:
+- Pullback (50d 고가 거리): 0~50점 (최대 50% pullback)
+- ATR-normalized 1d move: <0.5 +20점, ≥3 +25점 (U-shape)
+- BB position <0.3: +10점
+- RSI<30: +10점
+- 최대 95점 (이론적)
+
+**🇰🇷 KR (momentum 우세, KOSDAQ 특히)**:
+- Stage 2: +25점
+- Golden cross: +15점
+- 52w 고가 거리: 0~30점 (신고가일수록 높음)
+- RSI<30: +15점
+- ATR-norm ≥3 (이상치): +15점
+- *페널티*: Pullback 0~25점 차감 (KR에서는 deep pullback = 약세주)
+
+⚠️ Score는 백테스트 edge bps를 *직접*은 아니지만 방향성만 반영하는 heuristic.
+정렬 후 *반드시 차트로* 종목 상태/펀더멘털 확인 후 매수.
+
+**📍 Top N alpha 후보 토글** 켜면 자동으로 score 정렬 + 상위 N개로 좁힘 (모든
+다른 필터 무시). 한 번 클릭으로 시장에 맞는 best 후보 확인.
+"""
+
+
 # ============================================================
 # PR16/PR17 — Alpha predictor 필터 툴팁
 # ============================================================
