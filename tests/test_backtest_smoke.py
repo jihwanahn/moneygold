@@ -15,7 +15,10 @@ def _make_cfg() -> AppConfig:
         kis=KISConfig(app_key="x", app_secret="x", account_no="x", account_prod_cd="01"),
         sizing=SizingConfig(default_equity_krw=10_000_000, max_risk_per_trade_pct=1.0,
                             max_position_weight_pct=20.0, max_positions=5),
-        universe=UniverseFilter(liquidity_min_krw=1_000_000_000, mcap_min_krw=50_000_000_000),
+        universe=UniverseFilter(
+            liquidity_min_krw=1_000_000_000, mcap_min_krw=50_000_000_000,
+            us_mcap_min_usd=300_000_000, us_source="nasdaq_trader",
+        ),
         strategy=StrategyParams(
             stage2_require_inst_flow=False, rs_rank_min=70, sma200_slope_lookback=22,
             stage_ma_length=150, stage_ma_type="SMA",

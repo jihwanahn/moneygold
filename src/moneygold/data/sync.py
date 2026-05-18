@@ -190,14 +190,31 @@ class DataSync:
 
     # ----------- US (yfinance) -----------
 
-    def sync_universe_us(self, *, enrich: bool = True) -> pd.DataFrame:
-        """S&P 500 마스터를 master.parquet에 *append* (한국 기존 종목 유지).
+    def sync_universe_us(
+        self,
+        *,
+        source: str = "sp500",
+        enrich: bool = True,
+        mcap_min_usd: float | None = None,
+    ) -> pd.DataFrame:
+        """미국 마스터를 master.parquet에 *append* (한국 기존 종목 유지).
+
+        Parameters
+        ----------
+        source
+            'sp500' (≈505) 또는 'nasdaq_trader' (NYSE+NASDAQ+AMEX 전종목).
+        enrich
+            yfinance Ticker.info로 sector/industry/mcap 보강.
+        mcap_min_usd
+            지정 시 enrich 단계에서 mcap < threshold 종목 제외.
 
         market='US' 컬럼으로 한국과 구분. 같은 ticker 충돌은 가정상 없음
         (한국 6자리 숫자 vs 미국 알파벳).
         """
         from .. import universe_us as uni_us
-        us = uni_us.fetch_master_us(enrich=enrich)
+        us = uni_us.fetch_master_us(
+            source=source, enrich=enrich, mcap_min_usd=mcap_min_usd,
+        )
         path = store.master_path(self.data_dir)
         existing = store.read_parquet_safe(path)
         if existing is not None and not existing.empty:

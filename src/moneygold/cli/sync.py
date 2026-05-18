@@ -48,7 +48,7 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--financials", action="store_true", help="펀더멘털만 sync (KIS finance 분기)")
     mode.add_argument("--consensus", action="store_true", help="컨센서스만 sync (yfinance, 대형주 위주)")
     mode.add_argument("--us", action="store_true",
-                      help="미국 시스템 전체 sync: S&P 500 마스터 + 일봉 + 지수 + 분기재무 + 컨센서스")
+                      help="미국 시스템 전체 sync: 마스터 + 일봉 + 지수 + 분기재무 + 컨센서스")
 
     parser.add_argument("--tickers", help="특정 종목만. 콤마 구분. 예: 005930,000660")
     parser.add_argument("--limit", type=int, help="첫 N개 종목만 (디버그)")
@@ -59,6 +59,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="--financials 모드에서 캐시 무시 후 재 다운로드")
     parser.add_argument("--force-consensus", action="store_true",
                         help="--consensus 모드에서 캐시 무시 후 재 다운로드")
+    parser.add_argument("--us-source", choices=["sp500", "nasdaq_trader"], default=None,
+                        help="--us 모드 종목 소스. 기본은 config의 US_SOURCE.")
+    parser.add_argument("--us-mcap-min", type=float, default=None,
+                        help="--us 모드 mcap 컷오프 (USD). 기본은 config의 US_MCAP_MIN_USD.")
     args = parser.parse_args(argv)
 
     cfg = load_config()
@@ -75,8 +79,16 @@ def main(argv: list[str] | None = None) -> int:
     # 미국 시스템 전체 sync (yfinance 단독)
     if args.us:
         from .. import consensus as cons_mod
-        log.info("== US sync: 마스터 ==")
-        us_master = sync.sync_universe_us()
+        us_source = args.us_source or cfg.universe.us_source
+        us_mcap_min = (
+            args.us_mcap_min if args.us_mcap_min is not None
+            else cfg.universe.us_mcap_min_usd
+        )
+        log.info("== US sync: 마스터 (source=%s, mcap_min=$%.0fM) ==",
+                 us_source, us_mcap_min / 1e6)
+        us_master = sync.sync_universe_us(
+            source=us_source, mcap_min_usd=us_mcap_min,
+        )
         tickers = us_master["ticker"].tolist()
         if args.limit:
             tickers = tickers[: args.limit]

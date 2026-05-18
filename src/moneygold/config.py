@@ -53,6 +53,8 @@ class SizingConfig:
 class UniverseFilter:
     liquidity_min_krw: int
     mcap_min_krw: int
+    us_mcap_min_usd: float
+    us_source: str  # 'sp500' | 'nasdaq_trader'
 
 
 @dataclass(frozen=True)
@@ -120,6 +122,8 @@ def load_config() -> AppConfig:
         universe=UniverseFilter(
             liquidity_min_krw=_int("LIQUIDITY_MIN_KRW", 1_000_000_000),
             mcap_min_krw=_int("MCAP_MIN_KRW", 50_000_000_000),
+            us_mcap_min_usd=_float("US_MCAP_MIN_USD", 300_000_000),
+            us_source=_str("US_SOURCE", "nasdaq_trader"),
         ),
         strategy=StrategyParams(
             stage2_require_inst_flow=_bool("STAGE2_REQUIRE_INST_FLOW", True),

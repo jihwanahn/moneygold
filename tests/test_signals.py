@@ -25,7 +25,10 @@ def _make_cfg(
             max_position_weight_pct=20.0,
             max_positions=max_positions,
         ),
-        universe=UniverseFilter(liquidity_min_krw=liquidity_min_krw, mcap_min_krw=mcap_min_krw),
+        universe=UniverseFilter(
+            liquidity_min_krw=liquidity_min_krw, mcap_min_krw=mcap_min_krw,
+            us_mcap_min_usd=300_000_000, us_source="nasdaq_trader",
+        ),
         strategy=StrategyParams(
             stage2_require_inst_flow=False,
             rs_rank_min=rs_rank_min,
