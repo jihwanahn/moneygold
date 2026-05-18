@@ -283,17 +283,64 @@ class DataSync:
         *,
         period: str = "2y",
         progress: bool = True,
+        batch: bool = True,
+        batch_size: int = 50,
     ) -> dict:
+        """US 종목 일봉 sync.
+
+        Parameters
+        ----------
+        batch
+            True (기본)면 ``yf.download`` 멀티 ticker 배치 호출 — threaded HTTP로
+            ticker별 호출 대비 5-10배 빠름. False면 기존 per-ticker 호출.
+        batch_size
+            batch 모드에서 1회 호출 ticker 개수 (메모리/실패 risk 트레이드오프).
+        """
         stats = {"total": len(tickers), "updated": 0, "no_change": 0, "failed": []}
-        it = tqdm(tickers, desc="us bars", unit="tk") if progress else tickers
-        for tk in it:
-            r = self.backfill_bars_us(tk, period=period)
-            if r.error:
-                stats["failed"].append((tk, r.error))
-            elif r.added > 0:
-                stats["updated"] += 1
-            else:
-                stats["no_change"] += 1
+
+        if not batch:
+            it = tqdm(tickers, desc="us bars", unit="tk") if progress else tickers
+            for tk in it:
+                r = self.backfill_bars_us(tk, period=period)
+                if r.error:
+                    stats["failed"].append((tk, r.error))
+                elif r.added > 0:
+                    stats["updated"] += 1
+                else:
+                    stats["no_change"] += 1
+            return stats
+
+        # Batch 모드: ticker별 fetch 대신 yf.download 멀티
+        unique = list(dict.fromkeys(tickers))
+        batches = [unique[i : i + batch_size] for i in range(0, len(unique), batch_size)]
+        it = tqdm(batches, desc="us bars batch", unit="batch") if progress else batches
+        for batch_list in it:
+            try:
+                dfs = yfc.fetch_daily_bars_batch(
+                    batch_list, period=period, batch_size=batch_size,
+                )
+            except Exception as e:
+                for tk in batch_list:
+                    stats["failed"].append((tk, f"batch error: {e}"))
+                continue
+
+            for tk in batch_list:
+                df = dfs.get(tk)
+                if df is None or df.empty:
+                    stats["failed"].append((tk, "empty"))
+                    continue
+                try:
+                    added, _ = store.append_dedup(
+                        store.bars_path(self.data_dir, tk), df,
+                        dedup_keys=["date"], sort_keys=["date"],
+                    )
+                except Exception as e:
+                    stats["failed"].append((tk, str(e)))
+                    continue
+                if added > 0:
+                    stats["updated"] += 1
+                else:
+                    stats["no_change"] += 1
         return stats
 
     def sync_indices_us(self, codes: list[str] | None = None, *, period: str = "2y") -> dict:

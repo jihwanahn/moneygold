@@ -56,6 +56,91 @@ def fetch_daily_bars(
     return out
 
 
+def fetch_daily_bars_batch(
+    tickers: list[str],
+    *,
+    period: str = "2y",
+    auto_adjust: bool = True,
+    batch_size: int = 50,
+) -> dict[str, pd.DataFrame]:
+    """여러 ticker를 yf.download로 한 번에 받아 ticker별 표준 OHLCV DataFrame dict 반환.
+
+    `yf.download` 는 threaded HTTP로 ticker별 호출보다 5-10배 빠름. 단 일부
+    ticker는 batch 내에서 누락될 수 있으므로 *항상* 결과 dict의 keys를 확인.
+
+    Parameters
+    ----------
+    tickers : 종목 코드 리스트.
+    period : yfinance period 문자열 ('2y', '1y', '6mo', ...).
+    auto_adjust : 분할/배당 자동 조정.
+    batch_size : yf.download 1회 호출당 ticker 개수 (메모리/실패 risk 트레이드오프).
+
+    Returns
+    -------
+    dict[ticker, DataFrame]  단일 ticker DataFrame은 ``fetch_daily_bars`` 결과와
+        동일 포맷 (ticker/date/OHLCV/value/adj_factor). 데이터 없는 ticker는
+        빈 DataFrame.
+    """
+    import yfinance as yf
+
+    out: dict[str, pd.DataFrame] = {}
+    if not tickers:
+        return out
+    unique = list(dict.fromkeys(tickers))
+
+    for i in range(0, len(unique), batch_size):
+        batch = unique[i : i + batch_size]
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                df = yf.download(
+                    batch, period=period, group_by="ticker",
+                    auto_adjust=auto_adjust, threads=True, progress=False,
+                )
+        except Exception as e:
+            log.warning("yf.download batch 실패: %s — 빈 결과로 처리", e)
+            for tk in batch:
+                out[tk] = _empty_bars_df()
+            continue
+
+        if df is None or df.empty:
+            for tk in batch:
+                out[tk] = _empty_bars_df()
+            continue
+
+        # 단일 ticker일 때는 MultiIndex 안 만들어짐. wrap it.
+        if not isinstance(df.columns, pd.MultiIndex):
+            df.columns = pd.MultiIndex.from_product([batch, df.columns])
+
+        for tk in batch:
+            try:
+                sub = df[tk]
+            except KeyError:
+                out[tk] = _empty_bars_df()
+                continue
+            if sub is None or sub.empty:
+                out[tk] = _empty_bars_df()
+                continue
+            sub = sub.dropna(subset=["Close"])
+            if sub.empty:
+                out[tk] = _empty_bars_df()
+                continue
+            tdf = pd.DataFrame({
+                "ticker": tk,
+                "date": sub.index.strftime("%Y%m%d"),
+                "open": sub["Open"].astype(float).values,
+                "high": sub["High"].astype(float).values,
+                "low": sub["Low"].astype(float).values,
+                "close": sub["Close"].astype(float).values,
+                "volume": sub["Volume"].fillna(0).astype("int64").values,
+            })
+            tdf["value"] = (tdf["close"] * tdf["volume"]).astype("int64")
+            tdf["adj_factor"] = 1.0
+            out[tk] = tdf.reset_index(drop=True)
+
+    return out
+
+
 def fetch_index_bars(symbol: str = "^GSPC", period: str = "2y") -> pd.DataFrame:
     """지수 일봉 — ^GSPC (S&P 500), ^IXIC (NASDAQ Composite), ^RUT (Russell 2000)."""
     import yfinance as yf

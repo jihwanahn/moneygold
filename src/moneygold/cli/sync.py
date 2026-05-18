@@ -65,6 +65,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="--us 모드 종목 소스. 기본은 config의 US_SOURCE.")
     parser.add_argument("--us-mcap-min", type=float, default=None,
                         help="--us 모드 mcap 컷오프 (USD). 기본은 config의 US_MCAP_MIN_USD.")
+    parser.add_argument("--no-batch", action="store_true",
+                        help="--us 모드에서 ticker별 fetch (느림). 기본은 yf.download 배치 (~5-10배 빠름).")
     args = parser.parse_args(argv)
 
     cfg = load_config()
@@ -107,8 +109,8 @@ def main(argv: list[str] | None = None) -> int:
         idx_stats = sync.sync_indices_us()
         log.info("Indices: %s", idx_stats)
 
-        log.info("== US sync: 일봉 (%d 종목) ==", len(tickers))
-        bars_stats = sync.sync_bars_all_us(tickers)
+        log.info("== US sync: 일봉 (%d 종목, batch=%s) ==", len(tickers), not args.no_batch)
+        bars_stats = sync.sync_bars_all_us(tickers, batch=not args.no_batch)
         log.info("Bars: total=%d updated=%d no_change=%d failed=%d",
                  bars_stats["total"], bars_stats["updated"],
                  bars_stats["no_change"], len(bars_stats["failed"]))
