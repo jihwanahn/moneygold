@@ -157,6 +157,32 @@ def fetch_company_facts(cik: str, *, ua: str = _DEFAULT_UA) -> dict:
     return json.loads(raw)
 
 
+# 기간 분류 (XBRL duration fact의 일수 기반)
+#   Q   : 분기 단독 (~91일)
+#   H1  : YTD 6M (~181일)
+#   YTD9: YTD 9M (~272일)
+#   FY  : 회계연도 (~363일)
+_DAYS_Q = (80, 100)
+_DAYS_H1 = (175, 195)
+_DAYS_Y9 = (260, 285)
+_DAYS_FY = (350, 380)
+
+
+def _classify_period(d: dict) -> str | None:
+    s, e = d.get("start"), d.get("end")
+    if not s or not e:
+        return None
+    try:
+        days = (date.fromisoformat(e) - date.fromisoformat(s)).days
+    except ValueError:
+        return None
+    if _DAYS_Q[0] <= days <= _DAYS_Q[1]: return "Q"
+    if _DAYS_H1[0] <= days <= _DAYS_H1[1]: return "H1"
+    if _DAYS_Y9[0] <= days <= _DAYS_Y9[1]: return "Y9"
+    if _DAYS_FY[0] <= days <= _DAYS_FY[1]: return "FY"
+    return None
+
+
 def _is_quarterly_standalone(d: dict) -> bool:
     """end - start ∈ [80, 100]일 이면 분기 단독 (1Q ≈ 91일).
 
@@ -180,23 +206,119 @@ def _extract_by_tags(
 ) -> dict[str, dict]:
     """주어진 태그들에서 분기 단독 entries 추출 → {end_date: latest_entry}.
 
+    Standalone Q (~91일)가 SEC에 없는 케이스(주로 회계 Q4 - 10-K에만 FY로 들어감)는
+    YTD-누적 차감으로 합성: Q4 = FY - YTD9M.
+    Standalone Q가 이미 있으면 그것 우선 (합성보다 정확).
+
     여러 태그가 같은 end_date를 보고할 경우 최신 filed 우선 (모던 태그가 보통 최신).
     """
-    by_end: dict[str, dict] = {}
     us_gaap = facts.get("facts", {}).get("us-gaap", {})
+
+    # 각 기간 유형별 best entry (end_date 기준, 같은 end는 최신 filed)
+    by_end_q: dict[str, dict] = {}
+    by_end_h1: dict[str, dict] = {}
+    by_end_y9: dict[str, dict] = {}
+    by_end_fy: dict[str, dict] = {}
+    period_map = {"Q": by_end_q, "H1": by_end_h1, "Y9": by_end_y9, "FY": by_end_fy}
+
     for tag in tags:
         if tag not in us_gaap:
             continue
         units = us_gaap[tag].get("units", {})
-        arr = units.get(unit, [])
-        for d in arr:
-            if not _is_quarterly_standalone(d):
+        for d in units.get(unit, []):
+            kind = _classify_period(d)
+            if kind is None:
                 continue
+            target = period_map[kind]
             end = d["end"]
-            cur = by_end.get(end)
+            cur = target.get(end)
             if cur is None or d.get("filed", "") > cur.get("filed", ""):
-                by_end[end] = d
-    return by_end
+                target[end] = d
+
+    # YTD → 분기 단독 합성. start_date(회계연도 시작)로 같은 FY 묶음 찾기.
+    # Q4_synth: FY - Y9   (start 같음, end는 fy.end)
+    # Q3_synth: Y9 - H1   (start 같음, end는 y9.end)
+    # Q2_synth: H1 - Q1   (start 같음, end는 h1.end)
+    def _by_start(by_end: dict[str, dict]) -> dict[str, dict]:
+        m: dict[str, dict] = {}
+        for d in by_end.values():
+            s = d.get("start")
+            if s and s not in m:
+                m[s] = d
+        return m
+
+    q1_by_start = _by_start(by_end_q)  # 회계연도 시작 = fiscal Q1 시작
+    h1_by_start = _by_start(by_end_h1)
+    y9_by_start = _by_start(by_end_y9)
+
+    # FY 엔트리 순회 → Q4 합성
+    for fy in by_end_fy.values():
+        fy_start = fy.get("start")
+        if not fy_start:
+            continue
+        y9 = y9_by_start.get(fy_start)
+        if not y9:
+            continue
+        try:
+            fy_val = float(fy["val"])
+            y9_val = float(y9["val"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        q4_end = fy["end"]
+        if q4_end in by_end_q:
+            continue   # standalone Q4 이미 있음
+        q4_start = y9["end"]   # YTD 9M의 끝 = Q4 시작
+        by_end_q[q4_end] = {
+            "start": q4_start, "end": q4_end,
+            "val": fy_val - y9_val,
+            "filed": fy.get("filed", ""),
+            "fp": "Q4", "form": "synth-FY-Y9",
+            "_synthesized": True,
+        }
+
+    # Y9 엔트리 → Q3 합성
+    for y9 in by_end_y9.values():
+        s = y9.get("start")
+        h1 = h1_by_start.get(s) if s else None
+        if not h1:
+            continue
+        try:
+            y9_val = float(y9["val"]); h1_val = float(h1["val"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        q3_end = y9["end"]
+        if q3_end in by_end_q:
+            continue
+        by_end_q[q3_end] = {
+            "start": h1["end"], "end": q3_end,
+            "val": y9_val - h1_val,
+            "filed": y9.get("filed", ""),
+            "fp": "Q3", "form": "synth-Y9-H1",
+            "_synthesized": True,
+        }
+
+    # H1 엔트리 → Q2 합성
+    for h1 in by_end_h1.values():
+        s = h1.get("start")
+        q1 = q1_by_start.get(s) if s else None
+        if not q1:
+            continue
+        try:
+            h1_val = float(h1["val"]); q1_val = float(q1["val"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        q2_end = h1["end"]
+        if q2_end in by_end_q:
+            continue
+        by_end_q[q2_end] = {
+            "start": q1["end"], "end": q2_end,
+            "val": h1_val - q1_val,
+            "filed": h1.get("filed", ""),
+            "fp": "Q2", "form": "synth-H1-Q1",
+            "_synthesized": True,
+        }
+
+    return by_end_q
 
 
 def extract_quarterly_financials(facts: dict) -> pd.DataFrame:
