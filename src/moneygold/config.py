@@ -31,6 +31,25 @@ def _bool(key: str, default: bool) -> bool:
     return v.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _int_tuple(key: str, default: tuple[int, ...]) -> tuple[int, ...]:
+    """콤마/공백 구분 int 리스트. 빈 문자열 → default. 'all' → default."""
+    v = os.getenv(key)
+    if v is None or v.strip() == "":
+        return default
+    raw = v.replace(" ", "").lower()
+    if raw == "all":
+        return default
+    out: list[int] = []
+    for part in raw.split(","):
+        if not part:
+            continue
+        try:
+            out.append(int(part))
+        except ValueError:
+            continue
+    return tuple(out) if out else default
+
+
 @dataclass(frozen=True)
 class KISConfig:
     app_key: str
@@ -80,6 +99,14 @@ class StrategyParams:
     fundamental_required: bool
     skip_darvas: bool = False
     no_darvas_stop_pct: float = 7.0   # Darvas 미사용 시 stop = entry × (1 - this/100)
+    # 게이트 — 사용자 선택 가능
+    # allowed_stages: 워치리스트 후보로 허용할 Weinstein Stage. 빈 튜플 = 모든 Stage 허용.
+    #   기본 (2,) = Stage 2(ADVANCING)만 — 책/원전 권장.
+    # required_template_conditions: Minervini 8조건 중 *반드시 통과해야 하는* 조건 번호 (1~8).
+    #   기본 (1..8) = 8/8 모두 — 원전 권장.
+    #   빈 튜플 = Template 게이트 비활성 (조건 검사 안 함).
+    allowed_stages: tuple[int, ...] = (2,)
+    required_template_conditions: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7, 8)
 
 
 @dataclass(frozen=True)
@@ -145,6 +172,9 @@ def load_config() -> AppConfig:
             fundamental_required=_bool("FUNDAMENTAL_REQUIRED", False),
             skip_darvas=_bool("SKIP_DARVAS", False),
             no_darvas_stop_pct=_float("NO_DARVAS_STOP_PCT", 7.0),
+            allowed_stages=_int_tuple("ALLOWED_STAGES", (2,)),
+            required_template_conditions=_int_tuple(
+                "REQUIRED_TEMPLATE_CONDITIONS", (1, 2, 3, 4, 5, 6, 7, 8)),
         ),
         notify=NotifyConfig(
             channels=tuple(c.strip() for c in _str("NOTIFY_CHANNEL", "console").split(",") if c.strip()),

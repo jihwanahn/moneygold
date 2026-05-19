@@ -59,8 +59,17 @@ def _load_index_close(data_dir_str: str, code: str) -> pd.Series:
 
 
 @st.cache_data(show_spinner="시그널 생성 중 (~30초)…")
-def _run_signals(_data_dir_str: str, asof: str) -> dict:
-    """signals.generate_signals 실행. dict로 캐시 가능하게 직렬화."""
+def _run_signals(
+    _data_dir_str: str,
+    asof: str,
+    allowed_stages: tuple[int, ...],
+    required_template_conditions: tuple[int, ...],
+) -> dict:
+    """signals.generate_signals 실행. dict로 캐시 가능하게 직렬화.
+
+    allowed_stages / required_template_conditions 가 캐시 키에 포함되므로
+    UI에서 바꾸면 자동 재계산.
+    """
     cfg = load_config()
     data_dir = Path(_data_dir_str)
     master = _load_master(_data_dir_str)
@@ -134,6 +143,8 @@ def _run_signals(_data_dir_str: str, asof: str) -> dict:
         rs_momentum_map=rs_mom_map,
         fundamentals_map=fundamentals_map,
         consensus_map=consensus_map,
+        allowed_stages=allowed_stages,
+        required_template_conditions=required_template_conditions,
     )
     return sg.to_dict(sigs)
 
@@ -205,6 +216,48 @@ with st.sidebar:
         mcap_min_krw = mcap_max_krw = None
 
     st.divider()
+    st.subheader("🧭 게이트 (Stage / Trend Template)")
+    stage_options = [
+        (1, "Stage 1 (Basing — 횡보 바닥다지기)"),
+        (2, "Stage 2 (Advancing — 상승 추세, 책 권장)"),
+        (3, "Stage 3 (Topping — 상승 끝, 분배)"),
+        (4, "Stage 4 (Declining — 하락 추세)"),
+    ]
+    stage_labels = [lbl for _, lbl in stage_options]
+    stage_value_by_label = {lbl: v for v, lbl in stage_options}
+    selected_stage_labels = st.multiselect(
+        "허용 Weinstein Stage",
+        stage_labels,
+        default=[stage_options[1][1]],   # Stage 2
+        help="후보 풀에 포함시킬 Weinstein Stage. 기본은 Stage 2(원전 권장). "
+             "Stage 1을 추가하면 바닥다지기 초기 진입 후보까지 넓어짐. "
+             "비워두면 모든 Stage 허용.",
+    )
+    allowed_stages_sel = tuple(sorted(stage_value_by_label[lbl] for lbl in selected_stage_labels))
+
+    cond_labels_full = [
+        (1, "1) close > SMA150 & SMA200"),
+        (2, "2) SMA150 > SMA200"),
+        (3, "3) SMA200 우상향 (22봉 전 대비)"),
+        (4, "4) SMA50 > SMA150 & SMA200"),
+        (5, "5) close > SMA50"),
+        (6, "6) close ≥ 52w 저점 × 1.25"),
+        (7, "7) close ≥ 52w 고점 × 0.75"),
+        (8, "8) RS rank ≥ 70 (시장 내 백분위)"),
+    ]
+    cond_label_strings = [lbl for _, lbl in cond_labels_full]
+    cond_value_by_label = {lbl: v for v, lbl in cond_labels_full}
+    selected_cond_labels = st.multiselect(
+        "필수 통과 조건 (Minervini 8조건 중)",
+        cond_label_strings,
+        default=cond_label_strings,
+        help="8개 모두 기본 선택 (원전 권장 — '8/8 통과'). 일부를 해제하면 그 조건은 *통과하지 않아도* "
+             "후보 풀에 포함됨. 8개 모두 해제하면 Template 게이트 비활성 → "
+             "Stage만으로 필터링.",
+    )
+    required_conditions_sel = tuple(sorted(cond_value_by_label[lbl] for lbl in selected_cond_labels))
+
+    st.divider()
     st.subheader("📊 펀더멘털 필터")
     min_revenue_yoy = st.slider(
         "매출 YoY 최소 (%)", min_value=-50, max_value=100, value=-50, step=5,
@@ -255,7 +308,7 @@ with st.sidebar:
         st.rerun()
 
 # ---------- 시그널 생성 ----------
-sigs_dict = _run_signals(data_dir_str, asof_str)
+sigs_dict = _run_signals(data_dir_str, asof_str, allowed_stages_sel, required_conditions_sel)
 if not sigs_dict:
     st.error("시그널 생성 실패. 데이터 또는 지수가 부족합니다.")
     st.stop()
@@ -274,9 +327,13 @@ if only_tradable_kis and "tradable_kis" in master.columns:
 
 # ---------- 상단: 요약 카드 ----------
 st.title("📊 moneygold — 종목 추천 대시보드")
-st.caption(
-    f"asof **{asof_str}** · Weinstein Stage 2 + Minervini Trend Template 8/8 + Darvas Box"
+_stage_caption = (
+    "Stage " + "/".join(str(x) for x in allowed_stages_sel) if allowed_stages_sel else "Stage 전체"
 )
+_tmpl_caption = (
+    f"Template {len(required_conditions_sel)}/8" if required_conditions_sel else "Template 비활성"
+)
+st.caption(f"asof **{asof_str}** · Weinstein {_stage_caption} + Minervini {_tmpl_caption} + Darvas Box")
 
 with st.expander("❓ 이 대시보드 사용법 (처음 사용자 필독)", expanded=False):
     st.markdown(g.INTRO_HELP)
@@ -624,6 +681,9 @@ with tab_main:
             if "mcap" in flt.columns: base_cols.append("mcap")
             base_cols.extend(["rs_rank", "rs_momentum", "close", "box_state",
                               "days_in_box", "suggested_stop"])
+            # Stage 컬럼 — 여러 stage 허용 시 어떤 종목이 어느 stage인지 식별
+            if "stage" in flt.columns and (not allowed_stages_sel or len(allowed_stages_sel) != 1):
+                base_cols.insert(3, "stage")
             # 펀더멘털 컬럼
             for c in ["revenue_yoy", "op_income_yoy", "op_margin",
                       "growth_quarters", "op_growth_quarters", "accelerating"]:
@@ -652,6 +712,10 @@ with tab_main:
                 "ticker": st.column_config.TextColumn("종목", help=g.COL_TICKER),
                 "name": st.column_config.TextColumn("이름", help=g.COL_NAME),
                 "market": st.column_config.TextColumn("시장", help=g.COL_MARKET),
+                "stage": st.column_config.NumberColumn(
+                    "Stage", format="%d",
+                    help="현재 Weinstein Stage (1=Basing / 2=Advancing / 3=Topping / 4=Declining). "
+                         "사이드바 '허용 Stage'에서 선택한 것들만 여기 나타남."),
                 "rs_rank": st.column_config.NumberColumn("RS", format="%.1f", help=g.COL_RS_RANK),
                 "rs_momentum": st.column_config.NumberColumn("rs_mom", format="%+.2f", help=g.COL_RS_MOMENTUM),
                 "close": st.column_config.NumberColumn("종가", format="%,d", help=g.COL_CLOSE),
@@ -770,9 +834,17 @@ with tab_main:
                 if not wl_row.empty:
                     wl = wl_row.iloc[0]
                     with st.expander("미네비니 8조건 + 진단 (마우스 오버로 의미 확인)", expanded=True):
+                        _req_set = set(required_conditions_sel)
+                        if not _req_set:
+                            _gate_desc = "현재 게이트는 *Template 비활성* — 8조건은 진단용으로만 표시."
+                        elif _req_set == {1, 2, 3, 4, 5, 6, 7, 8}:
+                            _gate_desc = "현재 게이트는 *8/8 모두 필수* — 원전 권장."
+                        else:
+                            _gate_desc = (f"현재 게이트는 *조건 {sorted(_req_set)} 필수*. "
+                                          "필수 외 조건이 fail이어도 후보 풀에 포함됨 (회색 ❌).")
                         st.caption(
                             "Mark Minervini의 *Trade Like a Stock Market Wizard*에서 추출한 "
-                            "Trend Template. 8개 모두 통과한 종목만 BUY 후보로 인정."
+                            "Trend Template. " + _gate_desc
                         )
                         rs_v = float(wl["rs_rank"])
                         t = tmpl.check_template(
@@ -783,14 +855,23 @@ with tab_main:
                             low_series=bars["low"].astype(float) if "low" in bars.columns else None,
                         )
                         rows = [
-                            {"조건": title, "의미": desc, "통과": "✅" if c else "❌"}
-                            for (title, _ko, desc), c in zip(g.MINERVINI_CONDITIONS, t.checks)
+                            {
+                                "조건": title,
+                                "의미": desc,
+                                "필수": "✓" if (i + 1) in _req_set else "—",
+                                "통과": "✅" if c else "❌",
+                            }
+                            for i, ((title, _ko, desc), c) in enumerate(
+                                zip(g.MINERVINI_CONDITIONS, t.checks))
                         ]
                         st.dataframe(
                             pd.DataFrame(rows), use_container_width=True, hide_index=True,
                             column_config={
                                 "조건": st.column_config.TextColumn("조건", width="medium"),
                                 "의미": st.column_config.TextColumn("의미 (한 줄)", width="large"),
+                                "필수": st.column_config.TextColumn(
+                                    "필수", width="small",
+                                    help="✓ = 사이드바에서 '필수 통과 조건'으로 선택된 조건. — = 진단용."),
                                 "통과": st.column_config.TextColumn("통과", width="small"),
                             },
                         )

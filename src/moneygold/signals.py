@@ -106,7 +106,11 @@ class HoldSignal:
 
 @dataclass
 class WatchlistEntry:
-    """Stage 2 + Template 통과 종목 (Darvas 무관). 사용자 매수 검토용 후보 풀."""
+    """Stage + Template 게이트 통과 종목 (Darvas 무관). 사용자 매수 검토용 후보 풀.
+
+    게이트는 cfg.strategy.allowed_stages 와 cfg.strategy.required_template_conditions
+    (또는 generate_signals 호출 시 override) 으로 결정된다 — 더 이상 항상 Stage 2 & 8/8 아님.
+    """
     ticker: str
     name: str
     market: str
@@ -118,6 +122,8 @@ class WatchlistEntry:
     box_bottom: float | None
     days_in_box: int
     suggested_stop: float    # box_bottom 있으면 그것, 없으면 close × 0.93
+    stage: int = 0           # 현재 Weinstein Stage (1~4). 0 = UNKNOWN.
+    template_checks: list[bool] = field(default_factory=lambda: [False] * 8)  # 8조건 결과
     # 펀더멘털 (캐시된 KIS finance 분기). 데이터 없으면 NaN.
     revenue_yoy: float = float("nan")        # 매출 YoY (%)
     op_income_yoy: float = float("nan")      # 영업이익 YoY (%)
@@ -166,6 +172,8 @@ def generate_signals(
     rs_momentum_map: dict[str, float] | None = None,
     fundamentals_map: dict[str, fund.FundamentalsResult] | None = None,
     consensus_map: dict[str, cons.ConsensusResult] | None = None,
+    allowed_stages: tuple[int, ...] | None = None,
+    required_template_conditions: tuple[int, ...] | None = None,
 ) -> DailySignals:
     """일일 시그널 생성.
 
@@ -177,10 +185,24 @@ def generate_signals(
     rs_rank_map : ticker -> rs_rank 백분위 (사전 계산)
     idx_close_by_market : 'KOSPI'/'KOSDAQ' -> 지수 종가 시계열 (date 인덱스, asof까지)
     cfg : AppConfig (전략 파라미터 / 유동성 게이트 / 사이즈)
+    allowed_stages : 허용 Stage 집합. None이면 cfg.strategy.allowed_stages 사용.
+        빈 튜플 () = Stage 게이트 비활성 (모든 Stage 허용).
+    required_template_conditions : 반드시 통과해야 할 Minervini 조건 번호 (1~8).
+        None이면 cfg.strategy.required_template_conditions 사용.
+        빈 튜플 () = Template 게이트 비활성.
     """
     s = cfg.strategy
     u = cfg.universe
     sizing = cfg.sizing
+
+    allowed_stages_set = set(
+        allowed_stages if allowed_stages is not None
+        else getattr(s, "allowed_stages", (stg.STAGE_ADVANCING,))
+    )
+    required_conditions = tuple(
+        required_template_conditions if required_template_conditions is not None
+        else getattr(s, "required_template_conditions", tuple(range(1, tmpl.N_CONDITIONS + 1)))
+    )
 
     new_buys: list[BuySignal] = []
     holds: list[HoldSignal] = []
@@ -231,13 +253,13 @@ def generate_signals(
             continue
 
         # ---------- 신규 후보: BUY ----------
-        # Stage 2 확인 (RS는 Stage 판정에 안 들어감)
+        # Stage 게이트 — allowed_stages_set 안에 들어야 통과. 빈 집합은 "전부 허용".
         stage_params = _stage_params_from_cfg(s)
         stage_val, stage_since = _compute_stage(bars, asof, stage_params)
-        if stage_val != stg.STAGE_ADVANCING:
+        if allowed_stages_set and stage_val not in allowed_stages_set:
             continue
 
-        # Minervini Template (조건 6/7는 고가/저가 기준)
+        # Minervini Template — 조건 검사는 항상 수행 (진단/UI 용), 게이트는 required만.
         rs_rank_value = float(rs_rank_map.get(td.ticker, float("nan")))
         t = tmpl.check_template(
             bars["close"].astype(float),
@@ -247,10 +269,15 @@ def generate_signals(
             high_series=bars["high"].astype(float) if "high" in bars.columns else None,
             low_series=bars["low"].astype(float) if "low" in bars.columns else None,
         )
-        if not t.passed:
-            continue
+        # 빈 required = Template 게이트 비활성. 그 외에는 지정된 조건들이 모두 True여야 통과.
+        if required_conditions:
+            if not all(
+                0 < n <= len(t.checks) and t.checks[n - 1]
+                for n in required_conditions
+            ):
+                continue
 
-        # 여기까지 통과 = Stage 2 + Template 8/8. Darvas 무관하게 워치리스트 후보.
+        # 게이트 통과 → 워치리스트 후보 (Darvas는 별도 BREAKOUT 시그널용).
         box_for_watch = darvas.current_box(bars, box_params)
         last_close = float(bars["close"].iloc[-1])
         suggested_stop = float(box_for_watch.bottom) if box_for_watch.bottom is not None else last_close * 0.93
@@ -302,6 +329,8 @@ def generate_signals(
             box_bottom=float(box_for_watch.bottom) if box_for_watch.bottom is not None else None,
             days_in_box=int(box_for_watch.days_in_box),
             suggested_stop=suggested_stop,
+            stage=int(stage_val),
+            template_checks=list(t.checks),
             revenue_yoy=f_revenue_yoy, op_income_yoy=f_op_yoy, op_margin=f_op_margin,
             growth_quarters=f_growth_q, op_growth_quarters=f_op_growth_q,
             accelerating=f_accelerating,

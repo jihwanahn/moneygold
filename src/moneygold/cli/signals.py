@@ -156,7 +156,7 @@ def _print_report(sigs: sg.DailySignals, master: pd.DataFrame, watchlist_top: in
     # 2) 워치리스트 — Stage 2 + Template 통과, RS 상위 TOP N
     if sigs.watchlist:
         shown = sigs.watchlist[:watchlist_top]
-        print(f"[BUY 후보 풀 — Stage 2 + Template 통과, RS desc TOP {len(shown)}/{len(sigs.watchlist)}]")
+        print(f"[BUY 후보 풀 — Stage/Template 게이트 통과, RS desc TOP {len(shown)}/{len(sigs.watchlist)}]")
         print(f"  {'ticker':>7} {'name':>12} {'mkt':>6} {'RS':>6} {'rs_mom':>7} "
               f"{'close':>10} {'box':>12} {'box top':>10} {'box bot':>10} {'days':>5} {'stop hint':>10}")
         for w in shown:
@@ -197,6 +197,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--limit", type=int, help="첫 N개 종목만 (디버그)")
     parser.add_argument("--top", type=int, default=30, help="워치리스트 출력 상위 N (기본 30)")
     parser.add_argument("--export", action="store_true", help="store/signals/{asof}.json 저장")
+    parser.add_argument(
+        "--stages",
+        help="허용 Weinstein Stage 콤마 구분. 예: '2' (기본), '1,2', 'all'. "
+             "지정 안 하면 cfg.strategy.allowed_stages 사용."
+    )
+    parser.add_argument(
+        "--conditions",
+        help="Minervini 8조건 중 필수 통과 번호 (1~8) 콤마 구분. "
+             "예: '1,2,3,4,5,6,7,8' (기본, 8/8), '1,2,5' (3/8), '' (비활성). "
+             "지정 안 하면 cfg.strategy.required_template_conditions 사용."
+    )
     args = parser.parse_args(argv)
 
     cfg = load_config()
@@ -265,12 +276,40 @@ def main(argv: list[str] | None = None) -> int:
                 pass
     log.info("Consensus loaded for %d tickers", len(consensus_map))
 
+    def _parse_int_list(s: str | None) -> tuple[int, ...] | None:
+        if s is None:
+            return None
+        s = s.strip().lower()
+        if s == "all":
+            return ()
+        if s == "":
+            return ()
+        out = []
+        for part in s.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                out.append(int(part))
+            except ValueError:
+                continue
+        return tuple(out)
+
+    stages_override = _parse_int_list(args.stages)
+    cond_override = _parse_int_list(args.conditions)
+    if stages_override is not None:
+        log.info("Stage override: %s (empty = allow all)", stages_override or "(all)")
+    if cond_override is not None:
+        log.info("Condition override: %s (empty = template gate off)", cond_override or "(off)")
+
     log.info("Generating signals as of %s ...", asof)
     sigs = sg.generate_signals(
         asof, tickers, portfolio, rs_rank_map, idx_close_by_market, cfg,
         rs_momentum_map=rs_momentum_map,
         fundamentals_map=fundamentals_map,
         consensus_map=consensus_map,
+        allowed_stages=stages_override,
+        required_template_conditions=cond_override,
     )
 
     _print_report(sigs, master, watchlist_top=args.top)
