@@ -269,13 +269,11 @@ with st.sidebar:
     )
     min_growth_q = st.slider(
         "연속 매출 성장 분기", min_value=0, max_value=12, value=0,
-        help="매출 YoY > 0이 연속 N분기 이상. 4 이상이 좋은 신호. "
-             "⚠️ US는 yfinance 분기 데이터 한계(~5분기)로 측정 불가 → 데이터 부족 종목은 통과시킴.",
+        help="매출 YoY > 0이 연속 N분기 이상. 4 이상이 좋은 신호.",
     )
     only_accelerating = st.checkbox(
         "가속 종목만 (YoY 가속)",
-        help="최근 분기 YoY가 직전 분기 YoY보다 큰 종목 (모멘텀 가속). "
-             "직전 YoY 없으면 판정 불가 → 통과.",
+        help="최근 분기 YoY가 직전 분기 YoY보다 큰 종목 (모멘텀 가속).",
     )
 
     st.divider()
@@ -657,17 +655,9 @@ with tab_main:
         if "op_margin" in flt.columns and min_op_margin > -30:
             flt = flt[flt["op_margin"].fillna(min_op_margin) >= min_op_margin]
         if "growth_quarters" in flt.columns and min_growth_q > 0:
-            # 데이터가 충분치 못한 종목 (n_quarters_with_yoy < threshold)은 측정 불가 → 통과시킴.
-            # yfinance(US)는 분기 ~5개만 제공 → n_quarters_with_yoy=1 정도라 '4분기 연속 성장'
-            # 같은 임계는 KR 기준이지만 NaN-pass 동등 의미로 US도 자연 통과되도록 함.
-            n_yoy = flt.get("n_quarters_with_yoy", pd.Series(0, index=flt.index))
-            data_insufficient = n_yoy.fillna(0) < min_growth_q
-            meets_threshold = flt["growth_quarters"].fillna(0) >= min_growth_q
-            flt = flt[data_insufficient | meets_threshold]
+            flt = flt[flt["growth_quarters"].fillna(0) >= min_growth_q]
         if only_accelerating and "accelerating" in flt.columns:
-            # accelerating_unknown=True (직전 YoY 없음) 종목은 판정 불가 → 통과시킴 (NaN-pass)
-            unknown = flt.get("accelerating_unknown", pd.Series(False, index=flt.index)).fillna(False)
-            flt = flt[unknown | flt["accelerating"]]
+            flt = flt[flt["accelerating"] == True]
         # 컨센서스 필터 (NaN/0 = 통과)
         if "cons_n_analysts" in flt.columns and min_n_analysts > 0:
             flt = flt[flt["cons_n_analysts"].fillna(0) >= min_n_analysts]
@@ -755,9 +745,7 @@ with tab_main:
             if "growth_quarters" in disp.columns:
                 col_cfg["growth_quarters"] = st.column_config.NumberColumn(
                     "연속매출↑", format="%d",
-                    help="매출 YoY > 0이 연속 N분기. 8 = 2년 연속 성장. "
-                         "⚠️ US 종목은 yfinance가 분기 데이터를 ~5개만 제공해서 최대 1-2까지만 측정 가능. "
-                         "필터는 '데이터 부족' 종목을 통과시키므로 US는 임계값을 올려도 사라지지 않음.")
+                    help="매출 YoY > 0이 연속 N분기. 8 = 2년 연속 성장.")
             if "op_growth_quarters" in disp.columns:
                 col_cfg["op_growth_quarters"] = st.column_config.NumberColumn(
                     "연속영익↑", format="%d",
