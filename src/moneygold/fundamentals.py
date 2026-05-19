@@ -143,6 +143,12 @@ class FundamentalsResult:
     growth_quarters: int = 0                # 연속 매출 YoY > 0 분기 수 (최근부터 뒤로)
     op_growth_quarters: int = 0             # 연속 영업이익 YoY > 0 분기 수
     accelerating: bool = False              # 최근 YoY > 직전 YoY (매출 또는 영업이익)
+    # 측정 가능한 YoY 수 — 데이터 희소성 플래그. yfinance(US)는 분기 ~5개만 제공 → n=1,
+    # KIS(KR)는 8+ 제공. UI 필터에서 'min_growth_q > n_quarters_with_yoy'면 데이터 부족이라
+    # 판정 불가 → 통과시켜야 의도된 동작 (NaN 통과 패턴과 동일).
+    n_quarters_with_revenue_yoy: int = 0
+    n_quarters_with_op_yoy: int = 0
+    accelerating_unknown: bool = False      # 직전 YoY가 NaN이라 가속 판정 불가
     error: str | None = None
 
 
@@ -232,6 +238,8 @@ def build_fundamentals(
     latest_rev_yoy = float(last["revenue_yoy"]) if last is not None and pd.notna(last.get("revenue_yoy", np.nan)) else float("nan")
     latest_op_yoy = float(last["op_income_yoy"]) if last is not None and pd.notna(last.get("op_income_yoy", np.nan)) else float("nan")
     latest_eps_yoy = float(last["eps_yoy"]) if last is not None and "eps_yoy" in out.columns and pd.notna(last.get("eps_yoy", np.nan)) else float("nan")
+    n_rev_yoy = int(out["revenue_yoy"].notna().sum()) if "revenue_yoy" in out.columns else 0
+    n_op_yoy = int(out["op_income_yoy"].notna().sum()) if "op_income_yoy" in out.columns else 0
 
     return FundamentalsResult(
         quarters=out,
@@ -242,6 +250,8 @@ def build_fundamentals(
         growth_quarters=growth_q,
         op_growth_quarters=op_growth_q,
         accelerating=accelerating,
+        n_quarters_with_revenue_yoy=n_rev_yoy,
+        n_quarters_with_op_yoy=n_op_yoy,
     )
 
 
@@ -297,30 +307,23 @@ def build_fundamentals_from_cache(df: pd.DataFrame) -> FundamentalsResult:
                                 ("op_income", "op_income_yoy"),
                                 ("eps", "eps_yoy")])
     last = df.iloc[-1]
-    growth_q = 0
-    op_growth_q = 0
-    for i in range(len(df) - 1, -1, -1):
-        v = df["revenue_yoy"].iloc[i] if "revenue_yoy" in df.columns else np.nan
-        if pd.notna(v) and v > 0:
-            growth_q += 1
-        else:
-            break
-    for i in range(len(df) - 1, -1, -1):
-        v = df["op_income_yoy"].iloc[i] if "op_income_yoy" in df.columns else np.nan
-        if pd.notna(v) and v > 0:
-            op_growth_q += 1
-        else:
-            break
+    growth_q = _consecutive_positive_yoy(df, "revenue_yoy")
+    op_growth_q = _consecutive_positive_yoy(df, "op_income_yoy")
+    n_rev_yoy = int(df["revenue_yoy"].notna().sum()) if "revenue_yoy" in df.columns else 0
+    n_op_yoy = int(df["op_income_yoy"].notna().sum()) if "op_income_yoy" in df.columns else 0
     accelerating = False
+    accelerating_unknown = True   # 직전 YoY 없으면 가속 판정 불가
     if len(df) >= 2:
         cur_rev = df["revenue_yoy"].iloc[-1] if "revenue_yoy" in df.columns else np.nan
         prev_rev = df["revenue_yoy"].iloc[-2] if "revenue_yoy" in df.columns else np.nan
         cur_op = df["op_income_yoy"].iloc[-1] if "op_income_yoy" in df.columns else np.nan
         prev_op = df["op_income_yoy"].iloc[-2] if "op_income_yoy" in df.columns else np.nan
-        if (pd.notna(cur_rev) and pd.notna(prev_rev) and cur_rev > prev_rev) or (
-            pd.notna(cur_op) and pd.notna(prev_op) and cur_op > prev_op
-        ):
-            accelerating = True
+        rev_comparable = pd.notna(cur_rev) and pd.notna(prev_rev)
+        op_comparable = pd.notna(cur_op) and pd.notna(prev_op)
+        if rev_comparable or op_comparable:
+            accelerating_unknown = False
+            if (rev_comparable and cur_rev > prev_rev) or (op_comparable and cur_op > prev_op):
+                accelerating = True
 
     return FundamentalsResult(
         quarters=df,
@@ -331,4 +334,24 @@ def build_fundamentals_from_cache(df: pd.DataFrame) -> FundamentalsResult:
         growth_quarters=growth_q,
         op_growth_quarters=op_growth_q,
         accelerating=accelerating,
+        n_quarters_with_revenue_yoy=n_rev_yoy,
+        n_quarters_with_op_yoy=n_op_yoy,
+        accelerating_unknown=accelerating_unknown,
     )
+
+
+def _consecutive_positive_yoy(df: pd.DataFrame, col: str) -> int:
+    """최신부터 거꾸로 연속 양수 YoY 분기 수. NaN은 건너뛰지 않고 즉시 종료 (기존 동작).
+
+    데이터 희소성 보정은 호출 측에서 n_quarters_with_*_yoy 와 함께 처리한다.
+    """
+    if col not in df.columns:
+        return 0
+    count = 0
+    for i in range(len(df) - 1, -1, -1):
+        v = df[col].iloc[i]
+        if pd.notna(v) and v > 0:
+            count += 1
+        else:
+            break
+    return count

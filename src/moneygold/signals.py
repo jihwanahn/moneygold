@@ -131,6 +131,9 @@ class WatchlistEntry:
     growth_quarters: int = 0                  # 연속 매출 성장 분기 수
     op_growth_quarters: int = 0               # 연속 영업이익 성장 분기 수
     accelerating: bool = False                # YoY 가속 여부
+    n_quarters_with_yoy: int = 0              # 측정 가능한 매출 YoY 수 (yfinance=1, KIS=~8)
+    n_quarters_with_op_yoy: int = 0           # 측정 가능한 영익 YoY 수
+    accelerating_unknown: bool = False        # 데이터 부족으로 가속 판정 불가
     # 컨센서스 (캐시된 yfinance). 데이터 없으면 NaN/None.
     cons_n_analysts: int = 0
     cons_target_mean: float = float("nan")
@@ -299,6 +302,9 @@ def generate_signals(
             f_growth_q = f_entry.growth_quarters
             f_op_growth_q = f_entry.op_growth_quarters
             f_accelerating = f_entry.accelerating
+            f_n_rev_yoy = getattr(f_entry, "n_quarters_with_revenue_yoy", 0)
+            f_n_op_yoy = getattr(f_entry, "n_quarters_with_op_yoy", 0)
+            f_accel_unknown = getattr(f_entry, "accelerating_unknown", False)
         else:
             f_revenue_yoy = float("nan")
             f_op_yoy = float("nan")
@@ -306,6 +312,9 @@ def generate_signals(
             f_growth_q = 0
             f_op_growth_q = 0
             f_accelerating = False
+            f_n_rev_yoy = 0
+            f_n_op_yoy = 0
+            f_accel_unknown = True   # 펀더 데이터 자체가 없음 → 가속 판정 불가
 
         c_entry = consensus_map.get(td.ticker) if consensus_map else None
         if c_entry is not None and c_entry.available:
@@ -342,6 +351,9 @@ def generate_signals(
             revenue_yoy=f_revenue_yoy, op_income_yoy=f_op_yoy, op_margin=f_op_margin,
             growth_quarters=f_growth_q, op_growth_quarters=f_op_growth_q,
             accelerating=f_accelerating,
+            n_quarters_with_yoy=f_n_rev_yoy,
+            n_quarters_with_op_yoy=f_n_op_yoy,
+            accelerating_unknown=f_accel_unknown,
             cons_n_analysts=c_n, cons_target_mean=c_tm, cons_target_upside_pct=c_upside,
             cons_recommendation=c_rec, cons_forward_pe=c_fpe,
             cons_earnings_growth=c_eg, cons_revenue_growth=c_rg,
