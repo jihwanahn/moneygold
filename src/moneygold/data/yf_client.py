@@ -165,83 +165,9 @@ def fetch_index_bars(symbol: str = "^GSPC", period: str = "2y") -> pd.DataFrame:
     return out
 
 
-# yfinance 분기 손익 row name 별칭 (ABBV 등 일부 종목이 비표준 이름 사용)
-_REVENUE_ALIASES = ["Total Revenue", "Revenue", "Operating Revenue", "Total Revenues"]
-_OP_INCOME_ALIASES = [
-    "Operating Income",
-    "Operating Income or Loss",
-    "Total Operating Income As Reported",
-    "Operating Income From Continuing Operations",
-]
-_NET_INCOME_ALIASES = [
-    "Net Income",
-    "Net Income Common Stockholders",
-    "Net Income Continuous Operations",
-    "Net Income From Continuing Operation Net Minority Interest",
-    "Net Income Including Noncontrolling Interests",
-]
-_DILUTED_EPS_ALIASES = ["Diluted EPS", "Diluted EPS Continuing Operations"]
-_BASIC_EPS_ALIASES = ["Basic EPS", "Basic EPS Continuing Operations"]
-
-
-def fetch_quarterly_financials(ticker: str) -> pd.DataFrame:
-    """분기 손익 (Quarterly Income Statement). yfinance가 *분기 단독값* 반환.
-
-    Returns
-    -------
-    DataFrame  columns = ['quarter', 'year', 'q', 'revenue', 'op_income',
-                          'net_income', 'op_margin', 'eps', '...yoy']
-        한국 fundamentals.build_fundamentals와 동일 스키마 (정규화 단계 X).
-    """
-    import yfinance as yf
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        t = yf.Ticker(ticker)
-        q = t.quarterly_income_stmt
-    if q is None or q.empty:
-        return pd.DataFrame()
-
-    # q: index = 손익 항목 (Total Revenue 등), columns = 분기 timestamp (최신 → 과거)
-    rows = []
-    for col in sorted(q.columns):
-        y = col.year
-        qn = (col.month - 1) // 3 + 1
-        def _v_any(names: list[str]) -> float:
-            for name in names:
-                if name in q.index:
-                    v = q.loc[name, col]
-                    try:
-                        if pd.notna(v):
-                            return float(v)
-                    except Exception:
-                        continue
-            return float("nan")
-        revenue = _v_any(_REVENUE_ALIASES)
-        op_income = _v_any(_OP_INCOME_ALIASES)
-        net_income = _v_any(_NET_INCOME_ALIASES)
-        eps = _v_any(_DILUTED_EPS_ALIASES)
-        if pd.isna(eps):
-            eps = _v_any(_BASIC_EPS_ALIASES)
-        op_margin = (op_income / revenue * 100.0) if (revenue and revenue != 0 and pd.notna(op_income)) else float("nan")
-        rows.append({
-            "quarter": f"{y}Q{qn}",
-            "year": y, "q": qn,
-            "revenue": revenue,
-            "op_income": op_income,
-            "net_income": net_income,
-            "op_margin": op_margin,
-            "eps": eps,
-        })
-    df = pd.DataFrame(rows).sort_values(["year", "q"]).reset_index(drop=True)
-
-    # YoY: (year-1, same q) 매칭 — yfinance도 일부 종목 분기 누락 있음
-    from ..fundamentals import _attach_yoy_by_year_q
-    _attach_yoy_by_year_q(df, [("revenue", "revenue_yoy"),
-                                ("op_income", "op_income_yoy"),
-                                ("eps", "eps_yoy")])
-    return df
-
+# NOTE: 분기 손익은 SEC EDGAR (data/sec_edgar.py)로 이관됨 — yfinance는 분기 ~5개만
+# 줘서 'consecutive growth quarters' 같은 지표 측정 불가. yfinance 모듈은 가격(bars/
+# index)과 master enrichment, consensus 용도로만 유지.
 
 # ============================================================
 # Helpers

@@ -372,24 +372,16 @@ class DataSync:
         force: bool = False,
         progress: bool = True,
     ) -> dict:
-        """yfinance 분기 손익 (이미 단독값이라 정규화 불필요)."""
-        stats = {"total": len(tickers), "updated": 0, "cached": 0, "failed": []}
-        it = tqdm(tickers, desc="us financials", unit="tk") if progress else tickers
-        for tk in it:
-            path = fund.financials_path(self.data_dir, tk)
-            if path.exists() and not force:
-                stats["cached"] += 1
-                continue
-            try:
-                df = yfc.fetch_quarterly_financials(tk)
-                if df is None or df.empty:
-                    stats["failed"].append((tk, "empty"))
-                    continue
-                store.write_parquet_atomic(df, path)
-                stats["updated"] += 1
-            except Exception as e:
-                stats["failed"].append((tk, str(e)))
-        return stats
+        """SEC EDGAR XBRL companyfacts 분기 손익 (~17년 deep history).
+
+        2026-05 전환: yfinance는 분기 ~5개만 줘서 'consecutive growth quarters' 같은
+        지표가 구조적으로 측정 불가. SEC EDGAR로 교체하면 17+년 분기 데이터 확보.
+        스키마는 동일하므로 fundamentals.build_fundamentals_from_cache 변경 없음.
+        """
+        from . import sec_edgar
+        return sec_edgar.sync_financials_us(
+            self.data_dir, tickers, force=force, progress=progress,
+        )
 
     # ----------- Fundamentals (KIS finance 엔드포인트) -----------
 

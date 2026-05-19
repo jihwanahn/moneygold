@@ -155,22 +155,35 @@ def main(argv: list[str] | None = None) -> int:
             log.warning("  %s: %s", tk, err)
         return 0
 
-    # 펀더멘털만
+    # 펀더멘털만 — 마스터에서 시장 확인 후 KR(KIS)/US(SEC EDGAR)로 자동 라우팅
     if args.financials:
-        log.info("== sync_financials_for ==")
+        log.info("== sync_financials (market-aware: KR→KIS, US→SEC EDGAR) ==")
+        master = sync.load_universe()
         if args.tickers:
-            tickers = _parse_tickers_arg(args.tickers) or []
-        else:
-            master = sync.load_universe()
-            tickers = master["ticker"].tolist()
+            wanted = set(_parse_tickers_arg(args.tickers) or [])
+            master = master[master["ticker"].isin(wanted)]
         if args.limit:
-            tickers = tickers[: args.limit]
-        log.info("Target tickers: %d (force=%s)", len(tickers), args.force_financials)
-        stats = sync.sync_financials_for(tickers, force=args.force_financials)
-        log.info("Financials: total=%d updated=%d cached=%d failed=%d",
-                 stats["total"], stats["updated"], stats["cached"], len(stats["failed"]))
-        for tk, err in stats["failed"][:20]:
-            log.warning("  %s: %s", tk, err)
+            master = master.head(args.limit)
+        kr_tickers = master[master["market"].isin(["KOSPI", "KOSDAQ"])]["ticker"].tolist()
+        us_tickers = master[master["market"] == "US"]["ticker"].tolist()
+        log.info("Target: KR=%d, US=%d (force=%s)",
+                 len(kr_tickers), len(us_tickers), args.force_financials)
+        if kr_tickers:
+            log.info("-- KR via KIS finance --")
+            stats = sync.sync_financials_for(kr_tickers, force=args.force_financials)
+            log.info("KR Financials: total=%d updated=%d cached=%d failed=%d",
+                     stats["total"], stats["updated"], stats["cached"], len(stats["failed"]))
+            for tk, err in stats["failed"][:10]:
+                log.warning("  %s: %s", tk, err)
+        if us_tickers:
+            log.info("-- US via SEC EDGAR XBRL --")
+            stats = sync.sync_financials_us(us_tickers, force=args.force_financials)
+            log.info("US Financials: total=%d updated=%d cached=%d no_cik=%d no_data=%d failed=%d",
+                     stats["total"], stats["updated"], stats["cached"],
+                     stats.get("no_cik", 0), stats.get("no_data", 0),
+                     len(stats["failed"]))
+            for tk, err in stats["failed"][:10]:
+                log.warning("  %s: %s", tk, err)
         return 0
 
     # 지수만
