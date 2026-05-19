@@ -66,41 +66,30 @@ def _periodize_cumulative(
     out["_q"] = out["stac_yymm"].astype(str).str[4:6].astype(int).apply(lambda m: (m - 1) // 3 + 1)
     out = out.sort_values(["_year", "_q"]).reset_index(drop=True)
 
-    # 연간-only 감지: 각 연도당 row 1개 + 모두 같은 q (보통 q=4 December)
-    yq = out.groupby("_year")["_q"].agg(["count", "nunique"])
-    annual_only = (
-        len(yq) > 0
-        and bool((yq["count"] == 1).all())
-        and out["_q"].nunique() == 1
-    )
-    if annual_only:
-        # 각 row를 이미 standalone (full FY)으로 취급. cum_columns는 그대로 둔다.
-        for col in cum_columns:
-            if col in out.columns:
-                out[col] = pd.to_numeric(out[col], errors="coerce")
-        return out
-
+    # 각 연도 내에서: '첫 행 = YTD 그대로 (= 시작부터 그 분기까지 표준)', 이후 행 = 직전 YTD 차감.
+    # 이 규칙은 reporter 타입을 자동 처리:
+    #   - 연간 (각 연도 1행, q=4):       각 row 보존 (FY 단독값)
+    #   - 반기 (각 연도 2행, q=2,4):     H1 보존, Q4 = FY - H1 (= 2H)
+    #   - 분기 (각 연도 4행, q=1,2,3,4): Q1 보존, Q2=Q2YTD-Q1, Q3=Q3YTD-Q2YTD, Q4=FY-Q3YTD
+    #   - 부분 분기 (예: Samsung 2018Q3부터 시작): 2018Q3을 standalone로 *잘못* 라벨할 수
+    #     있으나 (실제로는 9M YTD), 후속 행들은 정확. 워치리스트는 최근 데이터를 보므로 영향 작음.
     for col in cum_columns:
         if col not in out.columns:
             continue
         ser = pd.to_numeric(out[col], errors="coerce")
         single = ser.copy()
-        for i in range(len(out)):
-            q = int(out["_q"].iloc[i])
-            y = int(out["_year"].iloc[i])
-            if q == 1:
-                single.iloc[i] = ser.iloc[i]
-            else:
-                # 같은 연도의 직전 분기 YTD 찾기
-                prev_mask = (out["_year"] == y) & (out["_q"] == q - 1)
-                if prev_mask.any():
-                    prev_val = ser[prev_mask].iloc[0]
-                    if pd.notna(prev_val) and pd.notna(ser.iloc[i]):
-                        single.iloc[i] = ser.iloc[i] - prev_val
+        for year, grp in out.groupby("_year"):
+            idxs = grp.index.tolist()
+            for j, i in enumerate(idxs):
+                if j == 0:
+                    # 그 연도의 첫 행 = YTD 시작부터 그 시점까지 (=standalone for partial year)
+                    single.iloc[i] = ser.iloc[i]
+                else:
+                    prev_i = idxs[j - 1]
+                    if pd.notna(ser.iloc[i]) and pd.notna(ser.iloc[prev_i]):
+                        single.iloc[i] = ser.iloc[i] - ser.iloc[prev_i]
                     else:
                         single.iloc[i] = np.nan
-                else:
-                    single.iloc[i] = np.nan
         out[col] = single
     return out
 
