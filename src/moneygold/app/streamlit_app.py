@@ -447,9 +447,10 @@ with tab_gainers:
                  "위의 상승률/필터 무시. 한 번 클릭으로 최강 후보 확인.",
         )
     with pctrl2:
-        top_n = st.number_input(
+        alpha_top_n = st.number_input(
             "Top N", min_value=5, max_value=100, value=10, step=5,
-            help="alpha_score 상위 몇 개를 볼지.",
+            key="gainers_alpha_top_n",
+            help="alpha_score 상위 몇 개를 볼지. (사이드바 '워치리스트 표시 개수'와 별개)",
         )
 
     df_g_all = _gainers_with_stage_cached(data_dir_str, asof_str, gainers_pct / 100.0)
@@ -462,7 +463,7 @@ with tab_gainers:
 
     # 필터 적용 (df_g_all → df_g). preset 모드면 필터 무시하고 alpha_score top N.
     if use_alpha_preset and "alpha_score" in df_g_all.columns:
-        df_g = df_g_all.sort_values("alpha_score", ascending=False).head(int(top_n)).copy()
+        df_g = df_g_all.sort_values("alpha_score", ascending=False).head(int(alpha_top_n)).copy()
     else:
         df_g = df_g_all.copy()
         # Alpha 필터
@@ -552,7 +553,7 @@ with tab_gainers:
             if disp_df.empty:
                 st.info("해당 조건에 맞는 종목 없음.")
             else:
-                # preset 모드면 alpha_score 정렬 (이미 head(top_n) 적용됨), 아니면 상승률 정렬
+                # preset 모드면 alpha_score 정렬 (이미 head(alpha_top_n) 적용됨), 아니면 상승률 정렬
                 if use_alpha_preset and "alpha_score" in disp_df.columns:
                     disp_df = disp_df.sort_values("alpha_score", ascending=False)
                 else:
