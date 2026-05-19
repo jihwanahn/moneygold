@@ -52,7 +52,11 @@ def _periodize_cumulative(
     """YTD 누적 컬럼을 분기 단독으로 변환.
 
     각 회계연도 내에서: Q1 = 그대로, Q2 = Q2_YTD - Q1, Q3 = Q3_YTD - Q2_YTD, Q4 = FY - Q3_YTD.
-    같은 회계연도의 *이전 분기*가 데이터에 없으면 NaN.
+
+    KIS는 일부 종목(연 1회 보고하는 작은 종목, 지주사 등 ~319개)에 분기 없이 *연간만*
+    반환한다 (stac_yymm 마다 12월). 그 경우 차감할 직전 분기 YTD가 없어 NaN으로 떨어지는데,
+    각 row 자체가 이미 FY 단독값이므로 그대로 보존하는 게 옳다. → 연간-only 데이터셋이라고
+    판단되면 (모든 row가 같은 회계 q 1행씩) 차감 단계를 건너뛴다.
     """
     out = df.copy()
     if "stac_yymm" not in out.columns:
@@ -61,6 +65,20 @@ def _periodize_cumulative(
     out["_year"] = out["stac_yymm"].astype(str).str[:4].astype(int)
     out["_q"] = out["stac_yymm"].astype(str).str[4:6].astype(int).apply(lambda m: (m - 1) // 3 + 1)
     out = out.sort_values(["_year", "_q"]).reset_index(drop=True)
+
+    # 연간-only 감지: 각 연도당 row 1개 + 모두 같은 q (보통 q=4 December)
+    yq = out.groupby("_year")["_q"].agg(["count", "nunique"])
+    annual_only = (
+        len(yq) > 0
+        and bool((yq["count"] == 1).all())
+        and out["_q"].nunique() == 1
+    )
+    if annual_only:
+        # 각 row를 이미 standalone (full FY)으로 취급. cum_columns는 그대로 둔다.
+        for col in cum_columns:
+            if col in out.columns:
+                out[col] = pd.to_numeric(out[col], errors="coerce")
+        return out
 
     for col in cum_columns:
         if col not in out.columns:
