@@ -644,8 +644,11 @@ with tab_main:
             flt = flt[flt["box_state"].isin(box_states)]
         if sectors is not None and "sector" in flt.columns:
             flt = flt[flt["sector"].isin(sectors)]
+        # mcap slider는 KRW(조원) 단위. US 종목은 USD라 단위 mismatch — KR/KOSDAQ만 적용.
         if mcap_min_krw is not None and "mcap" in flt.columns:
-            flt = flt[(flt["mcap"] >= mcap_min_krw) & (flt["mcap"] <= mcap_max_krw)]
+            kr_mask = flt["market"].isin(["KOSPI", "KOSDAQ"])
+            kr_keep = (flt["mcap"] >= mcap_min_krw) & (flt["mcap"] <= mcap_max_krw)
+            flt = flt[(~kr_mask) | kr_keep]
         # 펀더멘털 필터 (NaN은 통과 — 데이터 없는 종목은 거르지 않음)
         if "revenue_yoy" in flt.columns and min_revenue_yoy > -50:
             flt = flt[flt["revenue_yoy"].fillna(min_revenue_yoy) >= min_revenue_yoy]

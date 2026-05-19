@@ -232,12 +232,20 @@ def generate_signals(
         # ---------- 게이트 ----------
         if td.flagged:
             continue
-        if td.mcap < u.mcap_min_krw:
-            continue
-        # 유동성: 최근 20봉 평균 거래대금
+        # 시가총액 — KRW(국내)와 USD(미국)는 단위가 다르므로 시장별 threshold 사용
+        if td.market == "US":
+            if td.mcap < u.us_mcap_min_usd:
+                continue
+        else:
+            if td.mcap < u.mcap_min_krw:
+                continue
+        # 유동성: 최근 20봉 평균 거래대금 (USD든 KRW든 동일 단위로 비교)
+        # US는 value도 USD 기준이므로 별도 threshold 적용.
         if "value" in bars.columns and len(bars) >= 20:
             avg_value_20 = float(bars["value"].tail(20).mean())
-            if avg_value_20 < u.liquidity_min_krw:
+            liq_min = (u.us_mcap_min_usd * 0.001) if td.market == "US" else u.liquidity_min_krw
+            # US: ~$300K/day 정도가 적정 유동성 임계 (us_mcap_min × 0.001 ≈ $300K).
+            if avg_value_20 < liq_min:
                 continue
         else:
             continue
