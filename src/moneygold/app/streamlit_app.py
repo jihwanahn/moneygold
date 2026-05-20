@@ -58,17 +58,26 @@ def _load_index_close(data_dir_str: str, code: str) -> pd.Series:
     return df.set_index("date")["close"].astype(float)
 
 
+# WatchlistEntry 스키마 버전. 필드 추가/제거 시 bump → @st.cache_data 자동 무효화.
+# 이 값을 안 바꾸면 사용자가 옛 캐시(예: net_margin 컬럼 없는 dict)를 보고 새 필터가
+# 작동 안 하는 것처럼 보임 — 그 때문에 sidebar의 '🔄 시그널 재계산' 버튼을 누르거나
+# Streamlit 프로세스 재시작이 필요했음.
+_WATCHLIST_SCHEMA_VERSION = "2026-05-21-net-margin"
+
+
 @st.cache_data(show_spinner="시그널 생성 중 (~30초)…")
 def _run_signals(
     _data_dir_str: str,
     asof: str,
     allowed_stages: tuple[int, ...],
     required_template_conditions: tuple[int, ...],
+    schema_version: str = _WATCHLIST_SCHEMA_VERSION,
 ) -> dict:
     """signals.generate_signals 실행. dict로 캐시 가능하게 직렬화.
 
     allowed_stages / required_template_conditions 가 캐시 키에 포함되므로
-    UI에서 바꾸면 자동 재계산.
+    UI에서 바꾸면 자동 재계산. schema_version은 코드 측에서 필드 추가/제거 시 bump되며,
+    값이 바뀌면 @st.cache_data가 자동 무효화 → 옛 결과 재사용 방지.
     """
     cfg = load_config()
     data_dir = Path(_data_dir_str)
