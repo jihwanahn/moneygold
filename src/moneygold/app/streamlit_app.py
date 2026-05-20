@@ -164,6 +164,16 @@ if master.empty:
 with st.sidebar:
     st.title("⚙️ 필터")
 
+    # 🔍 종목 검색 — ticker / 종목명 부분일치. 비우면 일반 모드.
+    # 검색어 있을 때: 워치리스트 표는 매칭 행으로 좁히고, 게이트 미통과 종목도 차트 패널에서 볼 수 있음.
+    search_query = st.text_input(
+        "🔍 종목 검색",
+        value="",
+        placeholder="ticker 또는 종목명 (예: AAPL, 005930, 삼성, NVDA)",
+        help="ticker(prefix) 또는 종목명(substring) 부분일치 검색. "
+             "검색하면 다른 필터/게이트는 무시되고 매칭 종목의 차트와 진단을 바로 확인할 수 있음.",
+    )
+
     # asof
     latest_master_date = datetime.now().strftime("%Y%m%d")
     asof_str = st.text_input("기준일 (YYYYMMDD)", value=latest_master_date, max_chars=8,
@@ -671,13 +681,58 @@ with tab_main:
     else:
         flt = watchlist_df
 
+    # ---------- 🔍 검색 적용 ----------
+    # 검색어 있으면: 워치리스트 표를 매칭 행으로 좁히고, 게이트 미통과 종목 정보도 별도로 수집.
+    search_q = (search_query or "").strip().upper()
+    search_master_hits = pd.DataFrame()
+    if search_q:
+        if not flt.empty:
+            wl_match = (
+                flt["ticker"].astype(str).str.upper().str.contains(search_q, regex=False)
+                | flt["name"].astype(str).str.upper().str.contains(search_q, regex=False)
+            )
+            flt = flt[wl_match].reset_index(drop=True)
+        # 마스터에서도 검색 — 게이트 미통과인 종목까지 잡힘 (차트 패널 진입용)
+        m_match = (
+            master["ticker"].astype(str).str.upper().str.contains(search_q, regex=False)
+            | master["name"].astype(str).str.upper().str.contains(search_q, regex=False)
+        )
+        search_master_hits = master[m_match].copy()
+
     # ---------- 메인 2단: 좌측 워치리스트 / 우측 차트 ----------
     left, right = st.columns([0.42, 0.58])
 
     with left:
-        st.subheader(f"BUY 후보 풀 ({len(flt)}건 필터링)")
+        if search_q:
+            st.subheader(f"🔍 검색 결과: '{search_query}'")
+            st.caption(f"워치리스트 매칭 {len(flt)}건 · 마스터 매칭 {len(search_master_hits)}건")
+        else:
+            st.subheader(f"BUY 후보 풀 ({len(flt)}건 필터링)")
 
-        if flt.empty:
+        # 검색 결과 중 워치리스트에 *없는* 종목 표시 (게이트 미통과)
+        non_wl_hits = pd.DataFrame()
+        if search_q and not search_master_hits.empty:
+            wl_set = set(flt["ticker"]) if not flt.empty else set()
+            non_wl_hits = search_master_hits[~search_master_hits["ticker"].isin(wl_set)]
+
+        if flt.empty and search_q and non_wl_hits.empty:
+            st.info(f"'{search_query}' 와 일치하는 종목이 없습니다.")
+            selected_ticker = None
+        elif flt.empty and search_q:
+            # 검색 매칭은 있지만 모두 게이트 미통과 → 첫 매칭 종목을 차트 패널에 표시
+            st.warning(
+                f"매칭된 {len(non_wl_hits)}개 종목 모두 현재 게이트/필터를 통과하지 못합니다. "
+                f"차트와 진단은 우측에서 확인 가능합니다."
+            )
+            # 간단한 표로 매칭 종목들 나열
+            mcols = ["ticker", "name", "market"]
+            if "sector" in non_wl_hits.columns: mcols.append("sector")
+            st.dataframe(
+                non_wl_hits[mcols].head(20), use_container_width=True, hide_index=True,
+                height=min(400, 40 + 35 * len(non_wl_hits)),
+            )
+            selected_ticker = non_wl_hits.iloc[0]["ticker"]
+        elif flt.empty:
             st.info("필터 조건에 맞는 종목이 없습니다.")
             selected_ticker = None
         else:
@@ -835,60 +890,74 @@ with tab_main:
 
                 # 미네비니 8조건 패널
                 wl_row = flt[flt["ticker"] == selected_ticker]
-                if not wl_row.empty:
-                    wl = wl_row.iloc[0]
-                    with st.expander("미네비니 8조건 + 진단 (마우스 오버로 의미 확인)", expanded=True):
-                        _req_set = set(required_conditions_sel)
-                        if not _req_set:
-                            _gate_desc = "현재 게이트는 *Template 비활성* — 8조건은 진단용으로만 표시."
-                        elif _req_set == {1, 2, 3, 4, 5, 6, 7, 8}:
-                            _gate_desc = "현재 게이트는 *8/8 모두 필수* — 원전 권장."
-                        else:
-                            _gate_desc = (f"현재 게이트는 *조건 {sorted(_req_set)} 필수*. "
-                                          "필수 외 조건이 fail이어도 후보 풀에 포함됨 (회색 ❌).")
-                        st.caption(
-                            "Mark Minervini의 *Trade Like a Stock Market Wizard*에서 추출한 "
-                            "Trend Template. " + _gate_desc
-                        )
-                        rs_v = float(wl["rs_rank"])
-                        t = tmpl.check_template(
-                            bars["close"].astype(float), rs_v,
-                            sma200_slope_lookback=cfg.strategy.sma200_slope_lookback,
-                            rs_rank_min=float(cfg.strategy.rs_rank_min),
-                            high_series=bars["high"].astype(float) if "high" in bars.columns else None,
-                            low_series=bars["low"].astype(float) if "low" in bars.columns else None,
-                        )
-                        rows = [
-                            {
-                                "조건": title,
-                                "의미": desc,
-                                "필수": "✓" if (i + 1) in _req_set else "—",
-                                "통과": "✅" if c else "❌",
-                            }
-                            for i, ((title, _ko, desc), c) in enumerate(
-                                zip(g.MINERVINI_CONDITIONS, t.checks))
-                        ]
-                        st.dataframe(
-                            pd.DataFrame(rows), use_container_width=True, hide_index=True,
-                            column_config={
-                                "조건": st.column_config.TextColumn("조건", width="medium"),
-                                "의미": st.column_config.TextColumn("의미 (한 줄)", width="large"),
-                                "필수": st.column_config.TextColumn(
-                                    "필수", width="small",
-                                    help="✓ = 사이드바에서 '필수 통과 조건'으로 선택된 조건. — = 진단용."),
-                                "통과": st.column_config.TextColumn("통과", width="small"),
-                            },
-                        )
+                in_watchlist = not wl_row.empty
+                if in_watchlist:
+                    rs_v = float(wl_row.iloc[0]["rs_rank"])
+                else:
+                    # 검색으로 들어온 게이트 미통과 종목 — rs_rank 알 수 없으니 NaN.
+                    # 조건 8(RS≥70)은 자동 fail이지만 나머지 1-7은 정상 진단됨.
+                    rs_v = float("nan")
+                    st.warning(
+                        f"⚠️ {selected_ticker}는 현재 워치리스트에 없습니다 (게이트 미통과). "
+                        "차트와 1-7 조건 진단은 정상 표시되지만 조건 8(RS rank)은 자동 fail로 표시됩니다."
+                    )
+                with st.expander("미네비니 8조건 + 진단 (마우스 오버로 의미 확인)", expanded=True):
+                    _req_set = set(required_conditions_sel)
+                    if not _req_set:
+                        _gate_desc = "현재 게이트는 *Template 비활성* — 8조건은 진단용으로만 표시."
+                    elif _req_set == {1, 2, 3, 4, 5, 6, 7, 8}:
+                        _gate_desc = "현재 게이트는 *8/8 모두 필수* — 원전 권장."
+                    else:
+                        _gate_desc = (f"현재 게이트는 *조건 {sorted(_req_set)} 필수*. "
+                                      "필수 외 조건이 fail이어도 후보 풀에 포함됨 (회색 ❌).")
+                    st.caption(
+                        "Mark Minervini의 *Trade Like a Stock Market Wizard*에서 추출한 "
+                        "Trend Template. " + _gate_desc
+                    )
+                    t = tmpl.check_template(
+                        bars["close"].astype(float), rs_v,
+                        sma200_slope_lookback=cfg.strategy.sma200_slope_lookback,
+                        rs_rank_min=float(cfg.strategy.rs_rank_min),
+                        high_series=bars["high"].astype(float) if "high" in bars.columns else None,
+                        low_series=bars["low"].astype(float) if "low" in bars.columns else None,
+                    )
+                    rows = [
+                        {
+                            "조건": title,
+                            "의미": desc,
+                            "필수": "✓" if (i + 1) in _req_set else "—",
+                            "통과": "✅" if c else "❌",
+                        }
+                        for i, ((title, _ko, desc), c) in enumerate(
+                            zip(g.MINERVINI_CONDITIONS, t.checks))
+                    ]
+                    st.dataframe(
+                        pd.DataFrame(rows), use_container_width=True, hide_index=True,
+                        column_config={
+                            "조건": st.column_config.TextColumn("조건", width="medium"),
+                            "의미": st.column_config.TextColumn("의미 (한 줄)", width="large"),
+                            "필수": st.column_config.TextColumn(
+                                "필수", width="small",
+                                help="✓ = 사이드바에서 '필수 통과 조건'으로 선택된 조건. — = 진단용."),
+                            "통과": st.column_config.TextColumn("통과", width="small"),
+                        },
+                    )
 
-                        st.markdown(
-                            f"**진입 가이드** — 종가 `{wl['close']:,.0f}` · "
-                            f"권장 손절 `{wl['suggested_stop']:,.0f}` · "
-                            f"박스 `{wl['box_state']}` (top {wl['box_top']} / bottom {wl['box_bottom']})"
-                        )
-                        st.caption(
-                            "💡 권장 손절은 박스 바닥 또는 종가 -7% 중 하나. "
-                            "실제 진입가·손절가는 차트 보고 본인이 결정."
-                        )
+                if in_watchlist:
+                    wl = wl_row.iloc[0]
+                    st.markdown(
+                        f"**진입 가이드** — 종가 `{wl['close']:,.0f}` · "
+                        f"권장 손절 `{wl['suggested_stop']:,.0f}` · "
+                        f"박스 `{wl['box_state']}` (top {wl['box_top']} / bottom {wl['box_bottom']})"
+                    )
+                    st.caption(
+                        "💡 권장 손절은 박스 바닥 또는 종가 -7% 중 하나. "
+                        "실제 진입가·손절가는 차트 보고 본인이 결정."
+                    )
+                else:
+                    # 검색된 게이트 미통과 종목 — 진입 가이드 대신 간단 정보만
+                    last_close = float(bars["close"].iloc[-1])
+                    st.markdown(f"**현재 종가** `{last_close:,.0f}` · 박스/진입 가이드는 워치리스트 종목 한정.")
             else:
                 st.warning("선택한 종목의 bars 데이터를 찾을 수 없습니다.")
         else:
