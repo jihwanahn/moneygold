@@ -277,6 +277,11 @@ with st.sidebar:
         "영업이익률 최소 (%)", min_value=-30, max_value=50, value=-30, step=1,
         help="가장 최근 분기 영업이익률 (영업이익 ÷ 매출).",
     )
+    min_net_margin = st.slider(
+        "순이익률 최소 (%)", min_value=-30, max_value=50, value=-30, step=1,
+        help="가장 최근 분기 순이익률 (당기순이익 ÷ 매출). 영익률이 영업 효율이라면 "
+             "순익률은 *최종* 수익성 — 영업외손익·세금·이자 다 반영된 결과.",
+    )
     min_growth_q = st.slider(
         "연속 매출 성장 분기", min_value=0, max_value=12, value=0,
         help="매출 YoY > 0이 연속 N분기 이상. 4 이상이 좋은 신호.",
@@ -664,6 +669,8 @@ with tab_main:
             flt = flt[flt["revenue_yoy"].fillna(min_revenue_yoy) >= min_revenue_yoy]
         if "op_margin" in flt.columns and min_op_margin > -30:
             flt = flt[flt["op_margin"].fillna(min_op_margin) >= min_op_margin]
+        if "net_margin" in flt.columns and min_net_margin > -30:
+            flt = flt[flt["net_margin"].fillna(min_net_margin) >= min_net_margin]
         if "growth_quarters" in flt.columns and min_growth_q > 0:
             flt = flt[flt["growth_quarters"].fillna(0) >= min_growth_q]
         if only_accelerating and "accelerating" in flt.columns:
@@ -744,7 +751,7 @@ with tab_main:
             if "stage" in flt.columns and (not allowed_stages_sel or len(allowed_stages_sel) != 1):
                 base_cols.insert(3, "stage")
             # 펀더멘털 컬럼
-            for c in ["revenue_yoy", "op_income_yoy", "op_margin",
+            for c in ["revenue_yoy", "op_income_yoy", "op_margin", "net_margin",
                       "growth_quarters", "op_growth_quarters", "accelerating"]:
                 if c in flt.columns:
                     base_cols.append(c)
@@ -760,7 +767,7 @@ with tab_main:
             if "mcap" in disp.columns:
                 disp["mcap_trillion"] = (disp["mcap"] / 1e12).round(3)
                 disp = disp.drop(columns=["mcap"])
-            for c in ["revenue_yoy", "op_income_yoy", "op_margin",
+            for c in ["revenue_yoy", "op_income_yoy", "op_margin", "net_margin",
                       "cons_target_upside_pct", "cons_earnings_growth", "cons_last_surprise_pct",
                       "cons_rev_eps_0y_30d_pct"]:
                 if c in disp.columns:
@@ -797,6 +804,12 @@ with tab_main:
                 col_cfg["op_margin"] = st.column_config.NumberColumn(
                     "영익률%", format="%.1f",
                     help="가장 최근 분기 영업이익률 = 영업이익 ÷ 매출.")
+            if "net_margin" in disp.columns:
+                col_cfg["net_margin"] = st.column_config.NumberColumn(
+                    "순익률%", format="%.1f",
+                    help="가장 최근 분기 순이익률 = 당기순이익 ÷ 매출. "
+                         "영익률보다 낮으면 영업외손익·이자·세금에서 큰 손실. "
+                         "영익률보다 높으면 일회성 이익(자산매각·환차익 등) 가능성.")
             if "growth_quarters" in disp.columns:
                 col_cfg["growth_quarters"] = st.column_config.NumberColumn(
                     "연속매출↑", format="%d",

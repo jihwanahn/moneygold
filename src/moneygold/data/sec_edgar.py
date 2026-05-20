@@ -384,6 +384,7 @@ def extract_quarterly_financials(facts: dict) -> pd.DataFrame:
     df = df.drop(columns=["_end"]).sort_values(["year", "q"]).reset_index(drop=True)
 
     df["op_margin"] = (df["op_income"] / df["revenue"].replace(0, np.nan)) * 100.0
+    df["net_margin"] = (df["net_income"] / df["revenue"].replace(0, np.nan)) * 100.0
 
     # YoY — fundamentals.py 의 동일 로직 재사용 (year, q 매칭, abs(prev) 분모로 부호 보존)
     from ..fundamentals import _attach_yoy_by_year_q

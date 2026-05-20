@@ -128,6 +128,7 @@ class WatchlistEntry:
     revenue_yoy: float = float("nan")        # 매출 YoY (%)
     op_income_yoy: float = float("nan")      # 영업이익 YoY (%)
     op_margin: float = float("nan")          # 영업이익률 (%)
+    net_margin: float = float("nan")         # 순이익률 (%) = net_income / revenue × 100
     growth_quarters: int = 0                  # 연속 매출 성장 분기 수
     op_growth_quarters: int = 0               # 연속 영업이익 성장 분기 수
     accelerating: bool = False                # YoY 가속 여부
@@ -296,6 +297,7 @@ def generate_signals(
             f_revenue_yoy = f_entry.latest_revenue_yoy
             f_op_yoy = f_entry.latest_op_income_yoy
             f_op_margin = f_entry.latest_op_margin
+            f_net_margin = getattr(f_entry, "latest_net_margin", float("nan"))
             f_growth_q = f_entry.growth_quarters
             f_op_growth_q = f_entry.op_growth_quarters
             f_accelerating = f_entry.accelerating
@@ -303,6 +305,7 @@ def generate_signals(
             f_revenue_yoy = float("nan")
             f_op_yoy = float("nan")
             f_op_margin = float("nan")
+            f_net_margin = float("nan")
             f_growth_q = 0
             f_op_growth_q = 0
             f_accelerating = False
@@ -340,6 +343,7 @@ def generate_signals(
             stage=int(stage_val),
             template_checks=list(t.checks),
             revenue_yoy=f_revenue_yoy, op_income_yoy=f_op_yoy, op_margin=f_op_margin,
+            net_margin=f_net_margin,
             growth_quarters=f_growth_q, op_growth_quarters=f_op_growth_q,
             accelerating=f_accelerating,
             cons_n_analysts=c_n, cons_target_mean=c_tm, cons_target_upside_pct=c_upside,

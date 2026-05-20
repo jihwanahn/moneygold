@@ -150,6 +150,7 @@ class FundamentalsResult:
     growth_quarters: int = 0                # 연속 매출 YoY > 0 분기 수 (최근부터 뒤로)
     op_growth_quarters: int = 0             # 연속 영업이익 YoY > 0 분기 수
     accelerating: bool = False              # 최근 YoY > 직전 YoY (매출 또는 영업이익)
+    latest_net_margin: float = float("nan") # 가장 최근 분기 순이익률 = net_income / revenue × 100
     error: str | None = None
 
 
@@ -165,8 +166,8 @@ def build_fundamentals(
     if income_stmt_q is None or income_stmt_q.empty:
         return FundamentalsResult(quarters=pd.DataFrame(), error="no income statement")
 
-    # 손익계산서: 누적 → 단독 정규화
-    cum_cols_inc = ["sale_account", "sale_cost", "sale_totl_prfi", "bsop_prti"]
+    # 손익계산서: 누적 → 단독 정규화. thtr_ntin = 당기순이익 (KIS 필드).
+    cum_cols_inc = ["sale_account", "sale_cost", "sale_totl_prfi", "bsop_prti", "thtr_ntin"]
     ic = _periodize_cumulative(income_stmt_q, cum_cols_inc)
 
     # 재무비율 (eps 등)도 누적
@@ -181,7 +182,9 @@ def build_fundamentals(
     # 단독 분기 컬럼들
     revenue = pd.to_numeric(ic.get("sale_account"), errors="coerce")
     op_income = pd.to_numeric(ic.get("bsop_prti"), errors="coerce")
+    net_income = pd.to_numeric(ic.get("thtr_ntin"), errors="coerce")
     op_margin = (op_income / revenue.replace(0, np.nan)) * 100.0
+    net_margin = (net_income / revenue.replace(0, np.nan)) * 100.0
 
     out = pd.DataFrame({
         "quarter": ic["quarter"],
@@ -189,7 +192,9 @@ def build_fundamentals(
         "q": ic["_q"],
         "revenue": revenue.values,
         "op_income": op_income.values,
+        "net_income": net_income.values,
         "op_margin": op_margin.values,
+        "net_margin": net_margin.values,
     })
 
     if not rr.empty:
@@ -236,6 +241,7 @@ def build_fundamentals(
                 accelerating = True
 
     latest_op_margin = float(last["op_margin"]) if last is not None and pd.notna(last["op_margin"]) else float("nan")
+    latest_net_margin = float(last["net_margin"]) if last is not None and "net_margin" in out.columns and pd.notna(last.get("net_margin", np.nan)) else float("nan")
     latest_rev_yoy = float(last["revenue_yoy"]) if last is not None and pd.notna(last.get("revenue_yoy", np.nan)) else float("nan")
     latest_op_yoy = float(last["op_income_yoy"]) if last is not None and pd.notna(last.get("op_income_yoy", np.nan)) else float("nan")
     latest_eps_yoy = float(last["eps_yoy"]) if last is not None and "eps_yoy" in out.columns and pd.notna(last.get("eps_yoy", np.nan)) else float("nan")
@@ -243,6 +249,7 @@ def build_fundamentals(
     return FundamentalsResult(
         quarters=out,
         latest_op_margin=latest_op_margin,
+        latest_net_margin=latest_net_margin,
         latest_revenue_yoy=latest_rev_yoy,
         latest_op_income_yoy=latest_op_yoy,
         latest_eps_yoy=latest_eps_yoy,
@@ -300,6 +307,12 @@ def build_fundamentals_from_cache(df: pd.DataFrame) -> FundamentalsResult:
     if df.empty:
         return FundamentalsResult(quarters=df)
     df = df.sort_values(["year", "q"]).reset_index(drop=True) if {"year","q"}.issubset(df.columns) else df
+    # net_margin 컬럼 보강 (구 parquet은 없을 수 있음). net_income/revenue가 있으면 계산.
+    if "net_margin" not in df.columns and "net_income" in df.columns and "revenue" in df.columns:
+        df["net_margin"] = (
+            pd.to_numeric(df["net_income"], errors="coerce")
+            / pd.to_numeric(df["revenue"], errors="coerce").replace(0, np.nan)
+        ) * 100.0
     _attach_yoy_by_year_q(df, [("revenue", "revenue_yoy"),
                                 ("op_income", "op_income_yoy"),
                                 ("eps", "eps_yoy")])
@@ -332,6 +345,7 @@ def build_fundamentals_from_cache(df: pd.DataFrame) -> FundamentalsResult:
     return FundamentalsResult(
         quarters=df,
         latest_op_margin=float(last["op_margin"]) if pd.notna(last.get("op_margin", np.nan)) else float("nan"),
+        latest_net_margin=float(last["net_margin"]) if "net_margin" in df.columns and pd.notna(last.get("net_margin", np.nan)) else float("nan"),
         latest_revenue_yoy=float(last["revenue_yoy"]) if "revenue_yoy" in df.columns and pd.notna(last["revenue_yoy"]) else float("nan"),
         latest_op_income_yoy=float(last["op_income_yoy"]) if "op_income_yoy" in df.columns and pd.notna(last["op_income_yoy"]) else float("nan"),
         latest_eps_yoy=float(last["eps_yoy"]) if "eps_yoy" in df.columns and pd.notna(last.get("eps_yoy", np.nan)) else float("nan"),
