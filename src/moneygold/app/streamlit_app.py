@@ -618,8 +618,8 @@ with tab_gainers:
                     "close_to_sma200": st.column_config.NumberColumn(
                         "종가/SMA200", format="%.3f", help=g.COL_CLOSE_TO_SMA200,
                     ),
-                    "close": st.column_config.NumberColumn("종가", format="%,.2f"),
-                    "prev_close": st.column_config.NumberColumn("전일", format="%,.2f"),
+                    "close": st.column_config.NumberColumn("종가", format="localized"),
+                    "prev_close": st.column_config.NumberColumn("전일", format="localized"),
                 }
                 if "is_buy" in disp_df.columns:
                     col_cfg["is_buy"] = st.column_config.CheckboxColumn(
@@ -793,10 +793,10 @@ with tab_main:
                          "사이드바 '허용 Stage'에서 선택한 것들만 여기 나타남."),
                 "rs_rank": st.column_config.NumberColumn("RS", format="%.1f", help=g.COL_RS_RANK),
                 "rs_momentum": st.column_config.NumberColumn("rs_mom", format="%+.2f", help=g.COL_RS_MOMENTUM),
-                "close": st.column_config.NumberColumn("종가", format="%,.0f", help=g.COL_CLOSE),
+                "close": st.column_config.NumberColumn("종가", format="localized", help=g.COL_CLOSE),
                 "box_state": st.column_config.TextColumn("박스", help=g.COL_BOX_STATE),
                 "days_in_box": st.column_config.NumberColumn("box일", format="%d", help=g.COL_DAYS_IN_BOX),
-                "suggested_stop": st.column_config.NumberColumn("stop hint", format="%,.0f", help=g.COL_SUGGESTED_STOP),
+                "suggested_stop": st.column_config.NumberColumn("stop hint", format="localized", help=g.COL_SUGGESTED_STOP),
             }
             if "mcap_trillion" in disp.columns:
                 col_cfg["mcap_trillion"] = st.column_config.NumberColumn("시총(조)", format="%.2f", help=g.COL_MCAP_TRILLION)
@@ -1007,12 +1007,12 @@ with tab_main:
                     "name": st.column_config.TextColumn("이름"),
                     "market": st.column_config.TextColumn("시장"),
                     "rs_rank": st.column_config.NumberColumn("RS", format="%.1f", help=g.COL_RS_RANK),
-                    "entry_guide": st.column_config.NumberColumn("진입가", format="%,.0f",
+                    "entry_guide": st.column_config.NumberColumn("진입가", format="localized",
                                                                   help="박스 천장 × 1.003 (참고)"),
-                    "stop": st.column_config.NumberColumn("손절", format="%,.0f",
+                    "stop": st.column_config.NumberColumn("손절", format="localized",
                                                            help="박스 바닥 — 이 아래로 종가 마감 시 청산"),
-                    "box_top": st.column_config.NumberColumn("box top", format="%,.0f"),
-                    "box_bottom": st.column_config.NumberColumn("box bot", format="%,.0f"),
+                    "box_top": st.column_config.NumberColumn("box top", format="localized"),
+                    "box_bottom": st.column_config.NumberColumn("box bot", format="localized"),
                     "days_in_box": st.column_config.NumberColumn("box일", format="%d",
                                                                   help=g.COL_DAYS_IN_BOX),
                     "volume_ratio": st.column_config.NumberColumn("vol×", format="%.2f",
