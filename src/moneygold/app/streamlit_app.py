@@ -62,7 +62,7 @@ def _load_index_close(data_dir_str: str, code: str) -> pd.Series:
 # 이 값을 안 바꾸면 사용자가 옛 캐시(예: net_margin 컬럼 없는 dict)를 보고 새 필터가
 # 작동 안 하는 것처럼 보임 — 그 때문에 sidebar의 '🔄 시그널 재계산' 버튼을 누르거나
 # Streamlit 프로세스 재시작이 필요했음.
-_WATCHLIST_SCHEMA_VERSION = "2026-05-21-net-margin"
+_WATCHLIST_SCHEMA_VERSION = "2026-05-22-vol-acc-ratio"
 
 
 @st.cache_data(show_spinner="시그널 생성 중 (~30초)…")
@@ -371,7 +371,7 @@ with st.expander("❓ 이 대시보드 사용법 (처음 사용자 필독)", exp
         st.markdown(f"- **Stage {code} {label}** ({color}) — {desc}")
 
 
-tab_main, tab_gainers = st.tabs(["📋 BUY 후보", "📈 오늘 상승"])
+tab_main, tab_gainers, tab_backtest = st.tabs(["📋 BUY 후보", "📈 오늘 상승", "🔬 백테스트"])
 
 @st.cache_data(show_spinner="오늘 상승 종목 분석 중…")
 def _gainers_with_stage_cached(_data_dir_str: str, asof: str, min_pct: float) -> pd.DataFrame:
@@ -759,8 +759,9 @@ with tab_main:
             # Stage 컬럼 — 여러 stage 허용 시 어떤 종목이 어느 stage인지 식별
             if "stage" in flt.columns and (not allowed_stages_sel or len(allowed_stages_sel) != 1):
                 base_cols.insert(3, "stage")
-            # 펀더멘털 컬럼
-            for c in ["revenue_yoy", "op_income_yoy", "op_margin", "net_margin",
+            # 거래량 수급 + 펀더멘털 컬럼
+            for c in ["vol_acc_ratio",
+                      "revenue_yoy", "op_income_yoy", "op_margin", "net_margin",
                       "growth_quarters", "op_growth_quarters", "accelerating"]:
                 if c in flt.columns:
                     base_cols.append(c)
@@ -776,7 +777,8 @@ with tab_main:
             if "mcap" in disp.columns:
                 disp["mcap_trillion"] = (disp["mcap"] / 1e12).round(3)
                 disp = disp.drop(columns=["mcap"])
-            for c in ["revenue_yoy", "op_income_yoy", "op_margin", "net_margin",
+            for c in ["vol_acc_ratio",
+                      "revenue_yoy", "op_income_yoy", "op_margin", "net_margin",
                       "cons_target_upside_pct", "cons_earnings_growth", "cons_last_surprise_pct",
                       "cons_rev_eps_0y_30d_pct"]:
                 if c in disp.columns:
@@ -809,6 +811,12 @@ with tab_main:
                 col_cfg["op_income_yoy"] = st.column_config.NumberColumn(
                     "영익YoY%", format="%+.1f",
                     help="가장 최근 분기 영업이익 YoY 성장률.")
+            if "vol_acc_ratio" in disp.columns:
+                col_cfg["vol_acc_ratio"] = st.column_config.NumberColumn(
+                    "수급비", format="%.2f",
+                    help="거래량 수급/이탈 비율 = 최근 20일 평균 거래량 ÷ 최근 60일 평균. "
+                         ">1.2 누적 매수, 0.8~1.2 보합, <0.8 이탈. "
+                         "백테스트 결과 *이탈 강* 구간이 +20d 가장 좋은 경향 — '조용한 누적' 패턴.")
             if "op_margin" in disp.columns:
                 col_cfg["op_margin"] = st.column_config.NumberColumn(
                     "영익률%", format="%.1f",
@@ -1034,3 +1042,238 @@ with tab_main:
         "⚠️ 이 대시보드는 종목 *추천*만 합니다. 진입 가격·시점·수량은 사용자가 차트를 보고 직접 결정. "
         "백테스트 결과는 자동매매 가정 하의 *상한선* 추정으로 실제 결과와 다릅니다."
     )
+
+
+# ============================================================
+# 🔬 백테스트 탭
+# ============================================================
+with tab_backtest:
+    st.subheader("🔬 우리 엔진의 신뢰성 — Forward Return 백테스트")
+    st.caption(
+        "과거 N개 시점에 워치리스트(Stage + Template + 펀더멘털)를 재현하고, 각 종목의 "
+        "+5d/+10d/+20d 수익률을 측정해 factor 별로 집계합니다. "
+        "현재 사이드바의 게이트/필터 설정이 그대로 적용됩니다."
+    )
+
+    bc1, bc2, bc3, bc4 = st.columns([0.28, 0.28, 0.22, 0.22])
+    with bc1:
+        bt_start = st.text_input(
+            "시작일 (YYYYMMDD)",
+            value=(datetime.now() - pd.Timedelta(days=180)).strftime("%Y%m%d"),
+            max_chars=8, key="bt_start",
+            help="180일 전부터 시작이 기본. 데이터 보존 한도(2년) 안에서 자유 선택.",
+        )
+    with bc2:
+        bt_end = st.text_input(
+            "종료일 (YYYYMMDD)",
+            value=(datetime.now() - pd.Timedelta(days=30)).strftime("%Y%m%d"),
+            max_chars=8, key="bt_end",
+            help="forward return 계산 위해 *최소 20영업일 buffer* 필요 → 오늘로부터 30일 전이 기본.",
+        )
+    with bc3:
+        bt_stride = st.number_input(
+            "샘플 주기 (영업일)", min_value=1, max_value=20, value=5, key="bt_stride",
+            help="1 = 매일, 5 = 매주 월요일, 10 = 격주. 매일 돌리면 정밀하지만 시간 5배.",
+        )
+    with bc4:
+        bt_run = st.button("▶ 백테스트 실행", type="primary", key="bt_run_btn")
+
+    @st.cache_data(show_spinner=False)
+    def _run_backtest_cached(
+        _data_dir: str, start: str, end: str, stride: int,
+        allowed: tuple[int, ...], required: tuple[int, ...],
+        schema_version: str = _WATCHLIST_SCHEMA_VERSION,
+    ) -> dict:
+        from . import backtest_engine as bte
+        result = bte.run_backtest(
+            Path(_data_dir), cfg, start, end,
+            stride_days=int(stride),
+            allowed_stages=allowed,
+            required_template_conditions=required,
+        )
+        return {
+            "entries": result.entries.to_dict("records") if not result.entries.empty else [],
+            "asofs": result.asofs,
+            "market_returns": {k: v.to_dict("records") for k, v in result.market_returns.items()},
+            "horizons": list(result.horizons),
+        }
+
+    if bt_run:
+        with st.spinner(f"백테스트 실행 중 ({bt_start} ~ {bt_end}, stride={bt_stride})…"):
+            bt_dict = _run_backtest_cached(
+                data_dir_str, bt_start, bt_end, int(bt_stride),
+                allowed_stages_sel, required_conditions_sel,
+            )
+        entries = pd.DataFrame(bt_dict["entries"])
+        horizons = bt_dict["horizons"]
+        market_returns = {k: pd.DataFrame(v) for k, v in bt_dict["market_returns"].items()}
+
+        if entries.empty:
+            st.warning(
+                f"기간 {bt_start} ~ {bt_end} 동안 게이트 통과 종목이 없습니다. "
+                "기간 확장 또는 사이드바 게이트 완화 시도해보세요."
+            )
+        else:
+            n_snapshots = len(bt_dict["asofs"])
+            n_picks = len(entries)
+            n_unique = entries["ticker"].nunique()
+            st.success(
+                f"**{n_snapshots}** snapshots · **{n_picks}** picks "
+                f"(unique tickers {n_unique}) · 기간 {bt_start} ~ {bt_end}"
+            )
+
+            # ---------- 1) 종합 forward return ----------
+            st.markdown("### 1️⃣ 종합 forward return")
+            r1 = st.columns(len(horizons))
+            for i, h in enumerate(horizons):
+                col = f"fwd_{h}d"
+                if col not in entries.columns:
+                    continue
+                vals = entries[col].dropna()
+                if vals.empty:
+                    continue
+                mean_r = vals.mean()
+                hit_r = (vals > 0).mean() * 100
+                with r1[i]:
+                    st.metric(
+                        f"+{h}영업일 평균 수익률",
+                        f"{mean_r:+.2f}%",
+                        delta=f"적중률 {hit_r:.1f}%",
+                        help=f"{h}영업일 후 수익률의 *평균* (각 pick 동일 가중). "
+                             f"적중률 = 양수 수익 비율.",
+                    )
+
+            # ---------- 2) 시장 비교 (alpha) ----------
+            st.markdown("### 2️⃣ 시장 대비 alpha")
+            alpha_rows = []
+            for mkt in entries["market"].unique():
+                mkt_picks = entries[entries["market"] == mkt]
+                mkt_idx = market_returns.get(mkt)
+                if mkt_idx is None or mkt_idx.empty:
+                    continue
+                row = {"market": mkt, "n_picks": len(mkt_picks)}
+                for h in horizons:
+                    col = f"fwd_{h}d"
+                    pick_mean = float(mkt_picks[col].dropna().mean()) if col in mkt_picks.columns else float("nan")
+                    idx_mean = float(mkt_idx[col].dropna().mean()) if col in mkt_idx.columns else float("nan")
+                    row[f"pick_{h}d"] = pick_mean
+                    row[f"idx_{h}d"] = idx_mean
+                    row[f"alpha_{h}d"] = pick_mean - idx_mean
+                alpha_rows.append(row)
+            if alpha_rows:
+                alpha_df = pd.DataFrame(alpha_rows)
+                alpha_df = alpha_df.round(2)
+                st.dataframe(alpha_df, use_container_width=True, hide_index=True)
+                st.caption(
+                    "**alpha = pick 평균 − 시장지수 평균.** 양수면 우리 엔진이 단순 BUY-and-HOLD "
+                    "시장지수보다 잘 골랐다는 뜻. 음수면 운빨이거나 선택 알고리즘 결함."
+                )
+
+            # ---------- 3) Factor 분석 ----------
+            st.markdown("### 3️⃣ Factor 별 평균 수익률")
+            st.caption("같은 게이트를 통과한 종목 안에서, *추가 변수*가 forward return을 예측하는지.")
+
+            from . import backtest_engine as bte
+
+            with st.expander("📊 Weinstein Stage", expanded=True):
+                fs = bte.factor_summary(entries, "stage", horizons=tuple(horizons))
+                if not fs.empty:
+                    st.dataframe(fs.round(2), use_container_width=True, hide_index=True)
+
+            with st.expander("📊 RS rank quintile"):
+                fs = bte.factor_summary(
+                    entries, "rs_rank", horizons=tuple(horizons),
+                    bins=[0, 20, 40, 60, 80, 100],
+                    bin_labels=["Q1 (0-20)", "Q2 (20-40)", "Q3 (40-60)", "Q4 (60-80)", "Q5 (80-100)"],
+                )
+                if not fs.empty:
+                    st.dataframe(fs.round(2), use_container_width=True, hide_index=True)
+
+            with st.expander("📊 연속 매출 성장 분기 (growth_quarters)"):
+                fs = bte.factor_summary(
+                    entries, "growth_quarters", horizons=tuple(horizons),
+                    bins=[-1, 0, 2, 4, 8, 100],
+                    bin_labels=["0", "1-2", "3-4", "5-8", "9+"],
+                )
+                if not fs.empty:
+                    st.dataframe(fs.round(2), use_container_width=True, hide_index=True)
+
+            with st.expander("📊 거래량 수급/이탈 (vol_acc_ratio = 20일 평균 / 60일 평균)", expanded=True):
+                st.caption(
+                    "1.0보다 크면 최근 거래 *증가* (누적 매수 가능성), 작으면 *감소* (이탈). "
+                    "한국 시장에서 주목할 변수 — 외인/기관 매수가 들어오면 거래량이 먼저 늘어남."
+                )
+                fs = bte.factor_summary(
+                    entries, "vol_acc_ratio", horizons=tuple(horizons),
+                    bins=[0, 0.8, 1.0, 1.2, 1.5, 10],
+                    bin_labels=["이탈 강 (<0.8)", "이탈 약 (0.8-1.0)", "보합 (1.0-1.2)",
+                                "누적 약 (1.2-1.5)", "누적 강 (>1.5)"],
+                )
+                if not fs.empty:
+                    st.dataframe(fs.round(2), use_container_width=True, hide_index=True)
+
+                # KR 시장만 따로
+                kr_entries = entries[entries["market"].isin(["KOSPI", "KOSDAQ"])]
+                if not kr_entries.empty:
+                    st.markdown("**🇰🇷 한국 시장만 (KOSPI + KOSDAQ)**")
+                    fs_kr = bte.factor_summary(
+                        kr_entries, "vol_acc_ratio", horizons=tuple(horizons),
+                        bins=[0, 0.8, 1.0, 1.2, 1.5, 10],
+                        bin_labels=["이탈 강", "이탈 약", "보합", "누적 약", "누적 강"],
+                    )
+                    if not fs_kr.empty:
+                        st.dataframe(fs_kr.round(2), use_container_width=True, hide_index=True)
+
+            with st.expander("📊 영업이익률 (op_margin)"):
+                fs = bte.factor_summary(
+                    entries, "op_margin", horizons=tuple(horizons),
+                    bins=[-100, 0, 5, 10, 20, 1000],
+                    bin_labels=["적자", "0-5%", "5-10%", "10-20%", "20%+"],
+                )
+                if not fs.empty:
+                    st.dataframe(fs.round(2), use_container_width=True, hide_index=True)
+
+            with st.expander("📊 순이익률 (net_margin)"):
+                fs = bte.factor_summary(
+                    entries, "net_margin", horizons=tuple(horizons),
+                    bins=[-1000, 0, 5, 10, 20, 1000],
+                    bin_labels=["적자", "0-5%", "5-10%", "10-20%", "20%+"],
+                )
+                if not fs.empty:
+                    st.dataframe(fs.round(2), use_container_width=True, hide_index=True)
+
+            with st.expander("📊 가속 (accelerating)"):
+                fs = bte.factor_summary(entries, "accelerating", horizons=tuple(horizons))
+                if not fs.empty:
+                    st.dataframe(fs.round(2), use_container_width=True, hide_index=True)
+
+            # ---------- 4) Top / Bottom picks ----------
+            st.markdown("### 4️⃣ 개별 종목 결과 (상/하위)")
+            primary_horizon = horizons[1] if len(horizons) >= 2 else horizons[0]
+            primary_col = f"fwd_{primary_horizon}d"
+            if primary_col in entries.columns:
+                ranked = entries.dropna(subset=[primary_col]).sort_values(primary_col, ascending=False)
+                show_cols = [c for c in ["asof", "ticker", "name", "market", "rs_rank",
+                                          "stage", "growth_quarters", "op_margin",
+                                          "vol_acc_ratio", primary_col]
+                             if c in ranked.columns]
+                tl, tr = st.columns(2)
+                with tl:
+                    st.markdown(f"**Top 20 (+{primary_horizon}d)**")
+                    st.dataframe(ranked.head(20)[show_cols].round(2),
+                                  use_container_width=True, hide_index=True)
+                with tr:
+                    st.markdown(f"**Bottom 20 (+{primary_horizon}d)**")
+                    st.dataframe(ranked.tail(20)[show_cols].round(2),
+                                  use_container_width=True, hide_index=True)
+
+            st.divider()
+            st.caption(
+                "⚠️ **한계**: forward return은 *시가 진입 종가 청산* 가정이라 슬리피지·세금·거래비용 미반영. "
+                "실제 매매에서는 fwd return의 70-80% 정도만 기대 — *상한선* 참고."
+            )
+    else:
+        st.info(
+            "👆 기간을 지정하고 **▶ 백테스트 실행** 버튼을 누르세요. "
+            "초회 실행은 1-3분 소요 (snapshot 수 × ~10초). 이후 캐시되어 즉시 표시."
+        )

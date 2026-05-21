@@ -132,6 +132,9 @@ class WatchlistEntry:
     growth_quarters: int = 0                  # 연속 매출 성장 분기 수
     op_growth_quarters: int = 0               # 연속 영업이익 성장 분기 수
     accelerating: bool = False                # YoY 가속 여부
+    # 거래량 수급 — 20일 평균 거래량 / 60일 평균. >1.1: 누적 매수, <0.9: 이탈.
+    # bars[volume]만 가지고 계산하므로 KR/US 모두 적용. 향후 pykrx 외인/기관 수급 데이터로 보강 예정.
+    vol_acc_ratio: float = float("nan")
     # 컨센서스 (캐시된 yfinance). 데이터 없으면 NaN/None.
     cons_n_analysts: int = 0
     cons_target_mean: float = float("nan")
@@ -292,6 +295,15 @@ def generate_signals(
         suggested_stop = float(box_for_watch.bottom) if box_for_watch.bottom is not None else last_close * 0.93
         rs_mom_value = float(rs_momentum_map.get(td.ticker, float("nan"))) if rs_momentum_map else float("nan")
 
+        # 거래량 수급/이탈 비율: 최근 20일 평균 / 최근 60일 평균. 1.1↑ 누적, 0.9↓ 이탈.
+        # bars[volume]에 기반 — KR/US 공통 적용 가능. NaN-safe.
+        vol_acc_ratio = float("nan")
+        if "volume" in bars.columns and len(bars) >= 60:
+            vol20 = float(bars["volume"].tail(20).mean())
+            vol60 = float(bars["volume"].tail(60).mean())
+            if vol60 > 0:
+                vol_acc_ratio = vol20 / vol60
+
         f_entry = fundamentals_map.get(td.ticker) if fundamentals_map else None
         if f_entry is not None and f_entry.quarters is not None and not f_entry.quarters.empty:
             f_revenue_yoy = f_entry.latest_revenue_yoy
@@ -346,6 +358,7 @@ def generate_signals(
             net_margin=f_net_margin,
             growth_quarters=f_growth_q, op_growth_quarters=f_op_growth_q,
             accelerating=f_accelerating,
+            vol_acc_ratio=vol_acc_ratio,
             cons_n_analysts=c_n, cons_target_mean=c_tm, cons_target_upside_pct=c_upside,
             cons_recommendation=c_rec, cons_forward_pe=c_fpe,
             cons_earnings_growth=c_eg, cons_revenue_growth=c_rg,
