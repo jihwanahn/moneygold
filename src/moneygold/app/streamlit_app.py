@@ -345,10 +345,86 @@ with st.sidebar:
                              help=g.TOOLTIP_TOP_N)
 
     st.divider()
-    if st.button("🔄 시그널 재계산 (캐시 초기화)"):
+    st.subheader("🔄 데이터 갱신")
+
+    # 현재 보유 데이터의 가장 최근 날짜 (KOSPI200 / ^GSPC 인덱스 기준)
+    def _latest_local_date(code: str) -> str | None:
+        p = store.index_path(Path(data_dir_str), code)
+        if not p.exists():
+            return None
+        df = store.read_parquet_safe(p)
+        if df is None or df.empty or "date" not in df.columns:
+            return None
+        return str(df["date"].max())
+
+    _kr_latest = _latest_local_date("KOSPI200") or "없음"
+    _us_latest = _latest_local_date("^GSPC") or "없음"
+    st.caption(f"보유 데이터 최신: 🇰🇷 **{_kr_latest}** · 🇺🇸 **{_us_latest}**")
+
+    _bcol1, _bcol2 = st.columns(2)
+    with _bcol1:
+        _do_kr = st.button("🇰🇷 한국 (~5분)", use_container_width=True,
+                            help="pykrx + KIS로 KR 마스터/지수/종목 일봉 incremental sync.")
+    with _bcol2:
+        _do_us = st.button("🇺🇸 미국 (~3분)", use_container_width=True,
+                            help="yfinance로 US 지수/일봉 incremental sync. 분기재무/컨센서스는 제외.")
+
+    if _do_kr or _do_us:
+        from moneygold.data import sync as _ds
+        from moneygold.data.kis_client import KISClient as _KIS
+        _sync = _ds.DataSync(_KIS(cfg.kis), Path(cfg.data_dir))
+
+        if _do_kr:
+            with st.spinner("🇰🇷 한국 데이터 sync 중 (마스터/일봉/지수)…"):
+                try:
+                    m = _sync.sync_universe()
+                    tickers = m[m["market"].isin(["KOSPI", "KOSDAQ"])]["ticker"].tolist()
+                    bs = _sync.sync_bars_all(tickers)
+                    isn = _sync.sync_indices()
+                    st.success(
+                        f"🇰🇷 완료 — 마스터 {len(m)} (KR {len(tickers)}) · "
+                        f"일봉 updated {bs['updated']} no_change {bs['no_change']} "
+                        f"failed {len(bs['failed'])} · 지수 updated {isn['updated']}"
+                    )
+                except Exception as e:
+                    st.error(f"🇰🇷 sync 실패: {e}")
+
+        if _do_us:
+            with st.spinner("🇺🇸 미국 데이터 sync 중 (지수/일봉)…"):
+                try:
+                    isn = _sync.sync_indices_us()
+                    m = _sync.load_universe()
+                    us_tk = m[m["market"] == "US"]["ticker"].tolist()
+                    if not us_tk:
+                        # 마스터에 US가 비어 있으면 일단 마스터부터 채움
+                        us_master = _sync.sync_universe_us()
+                        us_tk = us_master["ticker"].tolist()
+                    bs = _sync.sync_bars_all_us(us_tk, batch=True)
+                    st.success(
+                        f"🇺🇸 완료 — 지수 {isn['updated']} · "
+                        f"일봉 updated {bs['updated']} no_change {bs['no_change']} "
+                        f"failed {len(bs['failed'])}"
+                    )
+                except Exception as e:
+                    st.error(f"🇺🇸 sync 실패: {e}")
+
+        # sync 후 모든 캐시 무효화
         _run_signals.clear()
         _load_master.clear()
         _load_bars.clear()
+        _load_index_close.clear()
+        _prev_trading_day.clear()
+        st.rerun()
+
+    st.divider()
+    if st.button("🔄 시그널 재계산 (캐시만 초기화)", use_container_width=True,
+                  help="parquet 데이터는 그대로 두고 Streamlit 캐시만 비움. "
+                       "필터/게이트 변경이 안 반영될 때 사용."):
+        _run_signals.clear()
+        _load_master.clear()
+        _load_bars.clear()
+        _load_index_close.clear()
+        _prev_trading_day.clear()
         st.rerun()
 
 # ---------- 시그널 생성 ----------

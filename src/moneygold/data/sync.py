@@ -44,12 +44,32 @@ class DataSync:
     # ----------- Universe -----------
 
     def sync_universe(self) -> pd.DataFrame:
-        """pykrx로 마스터 받아와 필터 후 store/meta/master.parquet."""
+        """pykrx로 KR(KOSPI/KOSDAQ) 마스터 받아와 master.parquet 갱신.
+
+        기존 master에 있던 *비-KR 행*(US 등)은 그대로 보존한 채 KR 부분만 교체한다.
+        — 과거: 매 sync마다 master를 통째로 덮어써서 sync_universe_us()로 추가했던 US
+          503행이 사라지는 버그가 있었음. (관찰 사례: KR daily sync 후 master에 US가 0행)
+        """
         raw = fetch_master_from_pykrx()
         clean = filter_master(raw)
         path = store.master_path(self.data_dir)
+
+        existing = store.read_parquet_safe(path)
+        if existing is not None and not existing.empty and "market" in existing.columns:
+            non_kr = existing[~existing["market"].isin(["KOSPI", "KOSDAQ"])]
+            if not non_kr.empty:
+                # clean(KR) + non_kr(US 등)을 합치되, ticker 중복은 최신(clean) 우선
+                combined = pd.concat([clean, non_kr], ignore_index=True)
+                combined = combined.drop_duplicates(subset=["ticker"], keep="first").reset_index(drop=True)
+                store.write_parquet_atomic(combined, path)
+                log.info(
+                    "Universe synced: KR %d + preserved non-KR %d = %d total -> %s",
+                    len(clean), len(non_kr), len(combined), path,
+                )
+                return combined
+
         store.write_parquet_atomic(clean, path)
-        log.info("Universe synced: %d tickers -> %s", len(clean), path)
+        log.info("Universe synced: %d KR tickers (no prior non-KR rows) -> %s", len(clean), path)
         return clean
 
     def load_universe(self) -> pd.DataFrame:
