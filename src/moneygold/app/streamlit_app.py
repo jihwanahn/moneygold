@@ -1084,7 +1084,7 @@ with tab_backtest:
         allowed: tuple[int, ...], required: tuple[int, ...],
         schema_version: str = _WATCHLIST_SCHEMA_VERSION,
     ) -> dict:
-        from . import backtest_engine as bte
+        from moneygold import backtest_engine as bte
         result = bte.run_backtest(
             Path(_data_dir), cfg, start, end,
             stride_days=int(stride),
@@ -1173,7 +1173,7 @@ with tab_backtest:
             st.markdown("### 3️⃣ Factor 별 평균 수익률")
             st.caption("같은 게이트를 통과한 종목 안에서, *추가 변수*가 forward return을 예측하는지.")
 
-            from . import backtest_engine as bte
+            from moneygold import backtest_engine as bte
 
             with st.expander("📊 Weinstein Stage", expanded=True):
                 fs = bte.factor_summary(entries, "stage", horizons=tuple(horizons))
