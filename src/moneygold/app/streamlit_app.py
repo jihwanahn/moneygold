@@ -45,6 +45,26 @@ def _load_master(data_dir_str: str) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False)
+def _prev_trading_day(asof_str: str, _data_dir_str: str) -> str | None:
+    """asof_str 직전 영업일 (지수 calendar 기준). 없으면 None.
+
+    엔진의 *예측력* 검증용 — '어제 BUY 후보였던 종목이 오늘 진짜 올랐나' 의
+    '어제' = 직전 영업일 (주말/공휴일 자동 skip)."""
+    for code in ["KOSPI200", "^GSPC", "KOSDAQ150"]:
+        idx_p = store.index_path(Path(_data_dir_str), code)
+        if not idx_p.exists():
+            continue
+        df = store.read_parquet_safe(idx_p)
+        if df is None or df.empty or "date" not in df.columns:
+            continue
+        dates = sorted(df["date"].astype(str).unique())
+        prior = [d for d in dates if d < asof_str]
+        if prior:
+            return prior[-1]
+    return None
+
+
+@st.cache_data(show_spinner=False)
 def _load_bars(data_dir_str: str, ticker: str) -> pd.DataFrame:
     df = store.read_parquet_safe(store.bars_path(Path(data_dir_str), ticker))
     return df if df is not None else pd.DataFrame()
@@ -510,10 +530,19 @@ with tab_gainers:
     if df_g_all.empty:
         st.info(f"asof {asof_str} 기준 +{gainers_pct:.1f}% 이상 상승 종목이 없습니다.")
     else:
+        # 어제 BUY 후보 풀 — 엔진 예측력 검증용 (오늘 상승했다면 우리 어제 추천이 맞았다는 증거)
+        prev_day = _prev_trading_day(asof_str, data_dir_str)
+        if prev_day:
+            yesterday_sigs = _run_signals(
+                data_dir_str, prev_day, allowed_stages_sel, required_conditions_sel,
+            )
+            yesterday_buy_set = {e.get("ticker") for e in yesterday_sigs.get("watchlist", [])}
+        else:
+            yesterday_buy_set = set()
+
         # 메트릭
         m1, m2, m3, m4 = st.columns(4)
-        buy_set = set(watchlist_df["ticker"]) if not watchlist_df.empty else set()
-        inter_df = df_g[df_g["ticker"].isin(buy_set)]
+        inter_df = df_g[df_g["ticker"].isin(yesterday_buy_set)]
         stage2_df = df_g[df_g["stage"] == stg.STAGE_ADVANCING]
         m1.metric("상승 종목 (필터 후)", len(df_g),
                   delta=f"{len(df_g) - len(df_g_all):+d}" if len(df_g) != len(df_g_all) else None,
@@ -523,8 +552,13 @@ with tab_gainers:
         m3.metric("Stage 4 (DECLINING)",
                   int((df_g["stage"] == stg.STAGE_DECLINING).sum()),
                   help="하락 추세 안에서의 반등 — 데드캣 바운스 가능성.")
-        m4.metric("BUY ∩ 상승", len(inter_df),
-                  help="워치리스트(Stage2+Template8/8) ∩ 오늘 상승 (필터 후).")
+        m4.metric(
+            f"어제({prev_day or '?'}) BUY ∩ 오늘 상승" if prev_day else "어제 BUY ∩ 오늘 상승",
+            len(inter_df),
+            help="**엔진 예측력 검증** — 어제 워치리스트(Stage+Template+필터 통과)에 있던 "
+                 "종목 중 오늘 N% 이상 상승한 수. 많을수록 우리 엔진이 *다음 날* 움직임을 "
+                 "잘 예측한 것.",
+        )
 
         st.divider()
 
@@ -566,13 +600,24 @@ with tab_gainers:
         with gr:
             if only_buy_intersection:
                 disp_df = inter_df.copy()
-                st.markdown(f"**BUY ∩ 오늘 상승 ({len(disp_df)}건)**")
-                st.caption(g.GAINERS_TOOLTIP_BUY_INTERSECT)
+                st.markdown(
+                    f"**어제({prev_day or '?'}) BUY ∩ 오늘 상승 ({len(disp_df)}건)** — "
+                    "엔진이 적중한 종목"
+                )
+                st.caption(
+                    "어제 워치리스트에 있던 종목 중 오늘 상승한 것. "
+                    "이 종목들은 우리 엔진의 *다음 날 예측이 맞은* 사례 — 같은 패턴을 "
+                    "오늘 BUY 후보 풀에서 골라 내일 검증."
+                )
             else:
                 disp_df = df_g.copy()
-                disp_df["is_buy"] = disp_df["ticker"].isin(buy_set)
+                disp_df["is_buy"] = disp_df["ticker"].isin(yesterday_buy_set)
                 st.markdown(f"**오늘 상승 종목 ({len(disp_df)}건, 필터 후)**")
-                st.caption("`is_buy` = 워치리스트 교집합 여부. `종가/SMA200` 컬럼이 1.0 이상이면 Stage 2 후보, 미만이면 Stage 4 의심.")
+                st.caption(
+                    f"`is_buy` = *어제({prev_day or '?'})* BUY 후보 풀 교집합 — "
+                    "체크돼 있으면 엔진이 어제 추천했고 오늘 상승한 *예측 적중* 사례. "
+                    "`종가/SMA200` 1.0 이상이면 Stage 2, 미만이면 Stage 4 의심."
+                )
 
             if disp_df.empty:
                 st.info("해당 조건에 맞는 종목 없음.")
@@ -623,7 +668,8 @@ with tab_gainers:
                 }
                 if "is_buy" in disp_df.columns:
                     col_cfg["is_buy"] = st.column_config.CheckboxColumn(
-                        "BUY 후보", help="signals.py 워치리스트(Stage2+Template8/8)에 포함되는 종목.",
+                        "어제 BUY", help="*어제* 워치리스트(Stage+Template+필터 통과)에 있던 종목. "
+                        "체크 = 엔진이 어제 추천했고 오늘 N% 이상 상승 → *다음 날 예측 적중* 사례.",
                     )
                 st.dataframe(
                     disp_df[cols], hide_index=True, use_container_width=True, height=600,
