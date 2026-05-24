@@ -8,10 +8,12 @@ ARCHITECTURE.md §5. 8조건 + (선택) growth 오버레이.
   3. sma200 > sma200[N봉 전] (기본 22봉 = 1개월 우상향)
   4. sma50 > sma150 AND sma50 > sma200
   5. close > sma50
-  6. close >= lowest(low, 260) × (1 + low_recovery_pct/100), 기본 25%
+  6. close >= lowest(low, 260) × (1 + low_recovery_pct/100), 기본 **30%** (책 p.79)
   7. close >= highest(high, 260) × (1 - high_proximity_pct/100), 기본 25%
   8. rs_rank >= 70 (IBD-style 4Q 가중 수익률의 시장 내 횡단면 백분위)
 
+조건 3 lookback 기본 **100봉**(약 5개월): 책 p.79 "trending up for at least 1 month
+(preferably 4–5 months minimum in most cases)"에서 *preferred minimum*을 채택.
 조건 6/7은 *고가/저가* 기준 — TradingView·미네비니 원전과 동일.
 조건 8 RS는 *횡단면 백분위* — 책의 "IBD RS ranking" 원전 의도.
 
@@ -50,10 +52,10 @@ def check_template(
     close_series: pd.Series,
     rs_rank_value: float,
     *,
-    sma200_slope_lookback: int = 22,
+    sma200_slope_lookback: int = 100,
     weeks_52: int = 260,
     rs_rank_min: float = 70.0,
-    low_recovery_pct: float = 25.0,
+    low_recovery_pct: float = 30.0,
     high_proximity_pct: float = 25.0,
     high_series: pd.Series | None = None,
     low_series: pd.Series | None = None,
@@ -65,11 +67,13 @@ def check_template(
     close_series : pd.Series  date-ordered close prices.
     rs_rank_value : float  사전 계산된 RS rank (0~100). NaN이면 조건 8 자동 fail.
     sma200_slope_lookback : sma200의 우상향 판정용 lookback일.
-        TradingView 미네비니 코드는 22일(1개월). 책엔 "preferably 4-5 months"라
-        100일도 가능하나 1개월이 일반 구현. 기본 22.
+        책 p.79: "trending up for at least 1 month (preferably 4–5 months minimum
+        in most cases)". 22봉(=1개월)은 *최소* 기준, 100봉(≈5개월)은 *권장 minimum*.
+        기본 **100** (책 권장 minimum 채택). 22로 낮추면 TV/일반 구현 수준.
     weeks_52 : 52주 lookback (TV 기본 260, 책 명시는 없음).
     rs_rank_min : 조건 8 임계.
-    low_recovery_pct : 조건 6 임계 (저점 대비 %). 책 30, TV 25. 기본 25.
+    low_recovery_pct : 조건 6 임계 (저점 대비 %). 책 p.79: "at least 30 percent
+        above its 52-week low". 기본 **30** (책 원전). TV 일반 구현은 25.
     high_proximity_pct : 조건 7 임계 (고점까지 %). 둘 다 25.
     high_series / low_series : 52주 고/저 계산용 고가/저가 시리즈. None이면 close fallback.
 

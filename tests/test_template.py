@@ -81,13 +81,26 @@ def test_condition_6_low_recovery_default_25pct():
 
 
 def test_condition_6_low_recovery_passes_at_threshold():
-    """저점 80, 현재 100이면 +25% → 디폴트 임계에 정확히 도달, 통과."""
+    """저점 80, 현재 104이면 +30% → 책 p.79 디폴트 임계에 정확히 도달, 통과."""
+    n = 320
+    arr = [100.0] * 100 + list(np.linspace(100, 80, 100)) + list(np.linspace(80, 104, 120))
+    arr = arr[:n]
+    close = pd.Series(arr)
+    r = template.check_template(close, rs_rank_value=85.0)
+    assert r.checks[5] is True
+
+
+def test_condition_6_at_25pct_now_fails_under_book_default():
+    """+25%는 책 30% 디폴트에 못 미쳐 fail (TV 25% 시절에 통과했던 경계)."""
     n = 320
     arr = [100.0] * 100 + list(np.linspace(100, 80, 100)) + list(np.linspace(80, 100, 120))
     arr = arr[:n]
     close = pd.Series(arr)
     r = template.check_template(close, rs_rank_value=85.0)
-    assert r.checks[5] is True
+    assert r.checks[5] is False
+    # low_recovery_pct=25를 명시 지정하면 (구 TV 호환) 통과
+    r25 = template.check_template(close, rs_rank_value=85.0, low_recovery_pct=25.0)
+    assert r25.checks[5] is True
 
 
 def test_condition_7_within_25pct_of_high():

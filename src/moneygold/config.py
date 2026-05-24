@@ -155,7 +155,7 @@ def load_config() -> AppConfig:
         strategy=StrategyParams(
             stage2_require_inst_flow=_bool("STAGE2_REQUIRE_INST_FLOW", True),
             rs_rank_min=_int("RS_RANK_MIN", 70),
-            sma200_slope_lookback=_int("SMA200_SLOPE_LOOKBACK", 22),
+            sma200_slope_lookback=_int("SMA200_SLOPE_LOOKBACK", 100),
             stage_ma_length=_int("STAGE_MA_LENGTH", 150),
             stage_ma_type=_str("STAGE_MA_TYPE", "SMA"),
             stage_slope_lookback=_int("STAGE_SLOPE_LOOKBACK", 20),

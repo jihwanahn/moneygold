@@ -192,14 +192,18 @@ TradingView 일반 구현 + Mark Minervini *"Trade Like a Stock Market Wizard"* 
 | --- | --- | --- |
 | 1 | `close > sma150 AND close > sma200` | — |
 | 2 | `sma150 > sma200` | — |
-| 3 | `sma200 > sma200[22]` | **22봉 우상향** (TV 일반, 책 "최소 1개월") |
+| 3 | `sma200 > sma200[100]` | **100봉 우상향** (책 p.79 권장 minimum 4–5개월, 22로 낮추면 TV 수준) |
 | 4 | `sma50 > sma150 AND sma50 > sma200` | — |
 | 5 | `close > sma50` | — |
-| 6 | `close >= lowest(low, 260) × 1.25` | **저가** 기준, 25% 회복 |
-| 7 | `close >= highest(high, 260) × 0.75` | **고가** 기준, 25% 이내 |
-| 8 | `rs_rank >= 70` | IBD 4Q 가중 모멘텀의 시장 횡단면 백분위 |
+| 6 | `close >= lowest(low, 260) × 1.30` | **저가** 기준, **30% 회복** (책 p.79 "at least 30 percent above its 52-week low") |
+| 7 | `close >= highest(high, 260) × 0.75` | **고가** 기준, 25% 이내 (책 p.79) |
+| 8 | `rs_rank >= 70` | IBD 4Q 가중 모멘텀의 시장 횡단면 백분위 (책 p.79 "no less than 70") |
 
 조건 6/7은 **고가/저가 기준** (종가 아님). 한국시장 ±30% 가격제한과 무관하게 원전 정의 충실.
+
+**2026-05 검증**: PDF *Trade Like a Stock Market Wizard* (Mark Minervini, p.79) 의 8조건을
+1:1 대조해 책 원전 수치로 통일. 이전 25%/22봉(TV 통례)에서 30%/100봉(책 권장)으로 상향 →
+게이트 더 엄격해서 후보 풀은 줄어들지만 *진위 신호* 농도 ↑.
 
 선택 9번 (Minervini growth, `FUNDAMENTAL_REQUIRED=true` 일 때만): 분기 EPS YoY ≥ 25% **또는** 직전 2분기 EPS 가속 (`Q-1 yoy > Q-2 yoy`). 같은 기준으로 매출. MCP `get_financial_data` 결과로 판정. 펀더멘털 미공시 종목은 건너뜀. **기본 false** — Weinstein·Darvas만으로 시작.
 
@@ -561,7 +565,7 @@ MCAP_MIN_KRW=50000000000
 # 전략 파라미터 (백테스트 후 확정)
 STAGE2_REQUIRE_INST_FLOW=true
 RS_RANK_MIN=70
-SMA200_SLOPE_LOOKBACK=22
+SMA200_SLOPE_LOOKBACK=100   # 책 p.79 권장 minimum (4-5개월). 22로 낮추면 TV 수준 (1개월)
 
 # Weinstein Stage (PR4: RS 제거 + history-dependent + TV 일치)
 STAGE_MA_LENGTH=150
