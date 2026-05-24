@@ -6,6 +6,8 @@
 
 # Reference PDFs (저작권)
 *.pdf
+# WSL이 .pdf 옆에 만드는 Windows alternate data stream metadata
+*:Zone.Identifier
 
 # Data & caches
 store/
