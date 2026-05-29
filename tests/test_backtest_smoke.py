@@ -6,13 +6,14 @@ import pandas as pd
 import pytest
 
 from moneygold import backtest as bt
-from moneygold.config import AppConfig, KISConfig, SizingConfig, UniverseFilter, StrategyParams, NotifyConfig
+from moneygold.config import AppConfig, KISConfig, DartConfig, SizingConfig, UniverseFilter, StrategyParams, NotifyConfig
 from pathlib import Path
 
 
 def _make_cfg() -> AppConfig:
     return AppConfig(
         kis=KISConfig(app_key="x", app_secret="x", account_no="x", account_prod_cd="01"),
+        dart=DartConfig(api_key=""),
         sizing=SizingConfig(default_equity_krw=10_000_000, max_risk_per_trade_pct=1.0,
                             max_position_weight_pct=20.0, max_positions=5),
         universe=UniverseFilter(

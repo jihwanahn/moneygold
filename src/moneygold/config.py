@@ -61,6 +61,14 @@ class KISConfig:
 
 
 @dataclass(frozen=True)
+class DartConfig:
+    """DART (금감원 전자공시) OpenAPI 설정. "가속화 장기투자" 탭의 자사주 데이터 출처."""
+    api_key: str
+    base_url: str = "https://opendart.fss.or.kr/api"
+    rate_per_sec: int = 8
+
+
+@dataclass(frozen=True)
 class SizingConfig:
     default_equity_krw: int
     max_risk_per_trade_pct: float
@@ -99,6 +107,11 @@ class StrategyParams:
     fundamental_required: bool
     skip_darvas: bool = False
     no_darvas_stop_pct: float = 7.0   # Darvas 미사용 시 stop = entry × (1 - this/100)
+    # MA20 trailing stop — Momentum Breakout 스타일 출구 옵션.
+    # True면 HOLD 평가 시 MA20 이 current_stop 보다 높으면 stop = MA20 로 ratchet.
+    # 기본 False — 기존 Darvas 박스 바닥 trailing 그대로.
+    momo_trailing_exit: bool = False
+    momo_trailing_ma_period: int = 20
     # 게이트 — 사용자 선택 가능
     # allowed_stages: 워치리스트 후보로 허용할 Weinstein Stage. 빈 튜플 = 모든 Stage 허용.
     #   기본 (2,) = Stage 2(ADVANCING)만 — 책/원전 권장.
@@ -120,6 +133,7 @@ class NotifyConfig:
 @dataclass(frozen=True)
 class AppConfig:
     kis: KISConfig
+    dart: DartConfig
     sizing: SizingConfig
     universe: UniverseFilter
     strategy: StrategyParams
@@ -139,6 +153,10 @@ def load_config() -> AppConfig:
             app_secret=_str("KIS_APP_SECRET"),
             account_no=_str("KIS_ACCOUNT_NO"),
             account_prod_cd=_str("KIS_ACCOUNT_PROD_CD", "01"),
+        ),
+        dart=DartConfig(
+            api_key=_str("DART_API_KEY"),
+            rate_per_sec=_int("DART_RATE_PER_SEC", 8),
         ),
         sizing=SizingConfig(
             default_equity_krw=_int("DEFAULT_EQUITY_KRW", 10_000_000),
@@ -172,6 +190,8 @@ def load_config() -> AppConfig:
             fundamental_required=_bool("FUNDAMENTAL_REQUIRED", False),
             skip_darvas=_bool("SKIP_DARVAS", False),
             no_darvas_stop_pct=_float("NO_DARVAS_STOP_PCT", 7.0),
+            momo_trailing_exit=_bool("MOMO_TRAILING_EXIT", False),
+            momo_trailing_ma_period=_int("MOMO_TRAILING_MA_PERIOD", 20),
             allowed_stages=_int_tuple("ALLOWED_STAGES", (2,)),
             required_template_conditions=_int_tuple(
                 "REQUIRED_TEMPLATE_CONDITIONS", (1, 2, 3, 4, 5, 6, 7, 8)),

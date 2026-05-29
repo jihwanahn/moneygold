@@ -367,6 +367,52 @@ class KISClient:
             div_cls="1" if quarterly else "0",
         )
 
+    # ---------- Dividend schedule (예탁원) ----------
+
+    def fetch_dividend_history(
+        self,
+        ticker: str,
+        from_date: str,
+        to_date: str,
+        gb: str = "0",
+    ) -> list[dict[str, Any]]:
+        """예탁원정보 (배당일정). [from_date, to_date] 기간 배당 공시 raw rows.
+
+        Parameters
+        ----------
+        ticker     : 6자리 종목코드
+        from_date  : YYYYMMDD
+        to_date    : YYYYMMDD
+        gb         : '0'=전체, '1'=결산배당, '2'=중간/분기배당. 기본 전체.
+
+        Returns
+        -------
+        list of dict — output1 그대로. 정규화는 호출자(``data.dividends``)가 담당.
+        주요 키:
+            record_date     : 배당기준일 (YYYYMMDD)
+            sht_cd          : 종목코드
+            isin_name       : 종목명
+            divi_kind       : '결산' / '분기' / '중간' / '반기' 등
+            per_sto_divi_amt: 현금배당금 (12-digit zero-padded 원 단위 string)
+            divi_rate       : 현금배당률 (% string, 앞에 공백 가능)
+            stk_divi_rate   : 주식배당률 (%)
+            divi_pay_dt     : 배당금지급일 (YYYYMMDD or empty)
+            stk_kind        : '보통' / '우선'
+
+        주의: KIS 응답이 단일 페이지(연속조회 불가)라 from_date~to_date 폭이 너무 넓으면
+        잘릴 수 있음. 안전하게 1~2년 단위로 나눠서 호출 권장.
+        """
+        params = {
+            "CTS": "",
+            "GB1": gb,
+            "F_DT": from_date,
+            "T_DT": to_date,
+            "SHT_CD": ticker,
+            "HIGH_GB": "",
+        }
+        data = self._get(ep.Path.DIVIDEND_SCHEDULE, ep.TrId.DIVIDEND_SCHEDULE, params)
+        return data.get("output1", []) or []
+
     # ---------- Index bars ----------
 
     def fetch_index_bars(

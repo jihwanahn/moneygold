@@ -24,6 +24,9 @@ class Path:
     FINANCE_RATIO = "/uapi/domestic-stock/v1/finance/financial-ratio"
     FINANCE_PROFIT_RATIO = "/uapi/domestic-stock/v1/finance/profit-ratio"
 
+    # 예탁원정보 (배당일정) — "가속화 장기투자" 탭용
+    DIVIDEND_SCHEDULE = "/uapi/domestic-stock/v1/ksdinfo/dividend"
+
     # 계좌 (read-only)
     BALANCE = "/uapi/domestic-stock/v1/trading/inquire-balance"
 
@@ -41,6 +44,8 @@ class TrId:
     FINANCE_BALANCE_SHEET = "FHKST66430100"
     FINANCE_RATIO = "FHKST66430300"
     FINANCE_PROFIT_RATIO = "FHKST66430400"
+    # Dividend schedule (예탁원)
+    DIVIDEND_SCHEDULE = "HHKDB669102C0"
 
 
 # KIS 지수 코드 (FID_INPUT_ISCD).

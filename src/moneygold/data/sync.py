@@ -89,10 +89,19 @@ class DataSync:
         *,
         years: int = 2,
         asof: str | None = None,
+        force_refresh_recent: int = 0,
+        source: str = "pykrx",
     ) -> BackfillResult:
         """한 종목의 일봉을 [asof - years*365, asof] 범위로 incremental 백필.
 
         기존 parquet이 있으면 가장 최근 날짜 + 1일부터 받음.
+
+        Parameters
+        ----------
+        force_refresh_recent : 양수면 *최근 N일* 을 강제로 다시 fetch + *덮어쓰기*.
+            장 마감 직후/미집계 응답으로 잘못 저장된 행 (휴장 패딩, 0 volume 등) 정정용.
+            0 (기본) = 기존 incremental 동작.
+        source : 'pykrx' (기본) 또는 'kis'. pykrx는 KRX 직접 통신 (안정적, 페이지네이션 없음).
         """
         end = asof or datetime.now().strftime("%Y%m%d")
         path = store.bars_path(self.data_dir, ticker)
@@ -101,15 +110,29 @@ class DataSync:
         if existing is None or existing.empty:
             start_dt = datetime.strptime(end, "%Y%m%d") - timedelta(days=years * 365)
             start = start_dt.strftime("%Y%m%d")
+            use_upsert = False
+        elif force_refresh_recent > 0:
+            # 최근 N일은 무조건 덮어쓰기 — incremental 시작점을 그만큼 앞당김.
+            start_dt = datetime.strptime(end, "%Y%m%d") - timedelta(days=force_refresh_recent)
+            start = start_dt.strftime("%Y%m%d")
+            use_upsert = True
         else:
             latest = str(existing["date"].max())
             next_dt = datetime.strptime(latest, "%Y%m%d") + timedelta(days=1)
             start = next_dt.strftime("%Y%m%d")
             if start > end:
                 return BackfillResult(ticker, 0, 0, 0)
+            use_upsert = False
 
         try:
-            df = self.kis.fetch_daily_bars(ticker, start, end)
+            if source == "pykrx":
+                from . import pykrx_bars
+                df = pykrx_bars.fetch_bars_pykrx(ticker, start, end)
+            elif source == "kis":
+                df = self.kis.fetch_daily_bars(ticker, start, end)
+            else:
+                return BackfillResult(ticker, 0, 0, 0,
+                                       error=f"unknown source: {source!r}")
         except KISAPIError as e:
             return BackfillResult(ticker, 0, 0, 0, error=f"KIS {e.rt_cd}: {e.msg}")
         except Exception as e:
@@ -119,9 +142,14 @@ class DataSync:
         if fetched == 0:
             return BackfillResult(ticker, 0, 0, 0)
 
-        added, skipped = store.append_dedup(
-            path, df, dedup_keys=["date"], sort_keys=["date"]
-        )
+        if use_upsert:
+            added, skipped = store.upsert_dedup(
+                path, df, dedup_keys=["date"], sort_keys=["date"]
+            )
+        else:
+            added, skipped = store.append_dedup(
+                path, df, dedup_keys=["date"], sort_keys=["date"]
+            )
         return BackfillResult(ticker, added=added, skipped=skipped, fetched=fetched)
 
     def sync_bars_all(
@@ -131,12 +159,22 @@ class DataSync:
         years: int = 2,
         asof: str | None = None,
         progress: bool = True,
+        force_refresh_recent: int = 0,
+        source: str = "pykrx",
     ) -> dict:
-        """주어진 종목 전체에 대해 backfill_bars. 통계 dict 반환."""
+        """주어진 종목 전체에 대해 backfill_bars. 통계 dict 반환.
+
+        force_refresh_recent : 최근 N일 강제 덮어쓰기 (휴장 패딩 등 정정용).
+        source : 'pykrx' (기본) 또는 'kis'.
+        """
         stats = {"total": len(tickers), "updated": 0, "no_change": 0, "failed": []}
         it = tqdm(tickers, desc="bars sync", unit="tk") if progress else tickers
         for tk in it:
-            r = self.backfill_bars(tk, years=years, asof=asof)
+            r = self.backfill_bars(
+                tk, years=years, asof=asof,
+                force_refresh_recent=force_refresh_recent,
+                source=source,
+            )
             if r.error:
                 stats["failed"].append((tk, r.error))
             elif r.added > 0:
@@ -145,7 +183,159 @@ class DataSync:
                 stats["no_change"] += 1
         return stats
 
-    # ----------- Index bars -----------
+    # ----------- KR pykrx batch (KIS 대안 — 200배 빠름, 더 안정) -----------
+
+    def sync_bars_kr_pykrx_batch(
+        self,
+        *,
+        recent_days: int = 5,
+        asof: str | None = None,
+        progress_callback=None,
+    ) -> dict:
+        """pykrx 일자별 batch fetch — 모든 KR 종목 × 최근 N영업일을 *10 호출* 로 sync.
+
+        KIS 종목별 호출 (2580 호출, ~5분, 가끔 500) 의 대안.
+        한 날짜 × 한 시장 호출이 ~0.1초라 N일 × 2 시장 = 매우 빠름.
+
+        장점:
+          - KIS 500 에러 없음 (KRX 직접 통신)
+          - 거래대금 직접 제공 (close × volume 근사 아님)
+          - 휴장 패딩 없음 (실제 거래 일자만 반환)
+          - 200배 이상 빠름
+
+        Parameters
+        ----------
+        recent_days : 최근 N영업일 만 fetch. 5 = 최근 5거래일 (force_refresh 동등).
+        asof : 기준일 YYYYMMDD. 기본 = 오늘.
+        progress_callback : (current, total, message) → None. UI progress bar 용.
+
+        Returns
+        -------
+        dict : {total_rows, days_fetched, tickers_touched, errors}
+        """
+        from pykrx import stock as _pkx
+
+        end_dt = datetime.strptime(asof, "%Y%m%d") if asof else datetime.now()
+        # 영업일 (월~금) 만 거꾸로 N개 — 정확한 영업일은 pykrx 자체가 빈 날 skip하니
+        # 약간 더 받아서 안전망. recent_days × 1.5 영업일 정도.
+        days_to_check: list[str] = []
+        cur = end_dt
+        while len(days_to_check) < int(recent_days * 1.5) + 2:
+            if cur.weekday() < 5:
+                days_to_check.append(cur.strftime("%Y%m%d"))
+            cur -= timedelta(days=1)
+        days_to_check.reverse()    # asc
+
+        total_rows = 0
+        days_fetched = 0
+        tickers_touched: set[str] = set()
+        errors: list[tuple[str, str]] = []
+
+        n_calls = len(days_to_check) * 2   # 2 시장
+        call_idx = 0
+        # 각 종목별로 행 모음
+        rows_by_ticker: dict[str, list[dict]] = {}
+
+        for d in days_to_check:
+            for market in ("KOSPI", "KOSDAQ"):
+                call_idx += 1
+                if progress_callback:
+                    progress_callback(call_idx, n_calls, f"{d} {market}")
+                try:
+                    df = _pkx.get_market_ohlcv(d, market=market)
+                except Exception as e:
+                    errors.append((f"{d}/{market}", str(e)))
+                    continue
+                if df is None or df.empty:
+                    continue
+                days_fetched += 1
+                for ticker, row in df.iterrows():
+                    rec = {
+                        "ticker": str(ticker),
+                        "date": d,
+                        "open": int(row["시가"]) if pd.notna(row["시가"]) else 0,
+                        "high": int(row["고가"]) if pd.notna(row["고가"]) else 0,
+                        "low": int(row["저가"]) if pd.notna(row["저가"]) else 0,
+                        "close": int(row["종가"]) if pd.notna(row["종가"]) else 0,
+                        "volume": int(row["거래량"]) if pd.notna(row["거래량"]) else 0,
+                        "value": int(row["거래대금"]) if pd.notna(row["거래대금"]) else 0,
+                        "adj_factor": 1.0,
+                    }
+                    # 0 close 는 비정상 (휴장 등) → skip
+                    if rec["close"] <= 0:
+                        continue
+                    rows_by_ticker.setdefault(str(ticker), []).append(rec)
+
+        # 종목별로 store 에 upsert (덮어쓰기)
+        n_tickers = len(rows_by_ticker)
+        for i, (tk, recs) in enumerate(rows_by_ticker.items(), 1):
+            if progress_callback and i % 100 == 0:
+                progress_callback(n_calls + i, n_calls + n_tickers, f"저장 중 {tk}")
+            df = pd.DataFrame(recs)
+            path = store.bars_path(self.data_dir, tk)
+            try:
+                store.upsert_dedup(path, df, dedup_keys=["date"], sort_keys=["date"])
+                total_rows += len(df)
+                tickers_touched.add(tk)
+            except Exception as e:
+                errors.append((tk, str(e)))
+
+        return {
+            "total_rows": total_rows,
+            "days_fetched": days_fetched,
+            "tickers_touched": len(tickers_touched),
+            "errors": errors,
+        }
+
+    def sync_indices_kr_pykrx(
+        self,
+        *,
+        recent_days: int = 5,
+        asof: str | None = None,
+    ) -> dict:
+        """KOSPI/KOSDAQ/KOSPI200/KOSDAQ150 지수 pykrx 로 sync.
+
+        pykrx 지수 코드: KOSPI=1001, KOSDAQ=2001, KOSPI200=1028, KOSDAQ150=2203.
+        """
+        from pykrx import stock as _pkx
+        INDICES = [("1001","KOSPI"), ("2001","KOSDAQ"), ("1028","KOSPI200"), ("2203","KOSDAQ150")]
+
+        end_dt = datetime.strptime(asof, "%Y%m%d") if asof else datetime.now()
+        start_dt = end_dt - timedelta(days=int(recent_days * 1.5) + 2)
+        start, end = start_dt.strftime("%Y%m%d"), end_dt.strftime("%Y%m%d")
+
+        stats = {"updated": 0, "no_change": 0, "failed": []}
+        for code, label in INDICES:
+            try:
+                raw = _pkx.get_index_ohlcv_by_date(start, end, code)
+                if raw is None or raw.empty:
+                    stats["no_change"] += 1
+                    continue
+                df = raw.reset_index().rename(columns={
+                    "날짜":"date","시가":"open","고가":"high","저가":"low",
+                    "종가":"close","거래량":"volume","거래대금":"value",
+                })
+                df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y%m%d")
+                df["index_code"] = label
+                for c in ("open","high","low","close"):
+                    df[c] = pd.to_numeric(df[c], errors="coerce")
+                for c in ("volume","value"):
+                    if c not in df.columns: df[c] = 0
+                    df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype("int64")
+                df = df[["index_code","date","open","high","low","close","volume","value"]]
+                added, _ = store.upsert_dedup(
+                    store.index_path(self.data_dir, label), df,
+                    dedup_keys=["date"], sort_keys=["date"],
+                )
+                if added > 0:
+                    stats["updated"] += 1
+                else:
+                    stats["no_change"] += 1
+            except Exception as e:
+                stats["failed"].append((label, str(e)))
+        return stats
+
+    # ----------- Index bars (KIS — 백업) -----------
 
     def backfill_index(
         self,
@@ -153,15 +343,26 @@ class DataSync:
         *,
         years: int = 2,
         asof: str | None = None,
+        force_refresh_recent: int = 0,
+        source: str = "pykrx",
     ) -> BackfillResult:
-        """한 지수의 일봉을 incremental 백필. 종목과 같은 로직."""
+        """한 지수의 일봉을 incremental 백필. 종목과 같은 로직.
+
+        force_refresh_recent : 양수면 최근 N일 강제 덮어쓰기 (휴장 패딩 정정용).
+        source : 'pykrx' (기본) 또는 'kis'.
+        """
         end = asof or datetime.now().strftime("%Y%m%d")
         path = store.index_path(self.data_dir, index_code)
         existing = store.read_parquet_safe(path)
+        use_upsert = False
 
         if existing is None or existing.empty:
             start_dt = datetime.strptime(end, "%Y%m%d") - timedelta(days=years * 365)
             start = start_dt.strftime("%Y%m%d")
+        elif force_refresh_recent > 0:
+            start_dt = datetime.strptime(end, "%Y%m%d") - timedelta(days=force_refresh_recent)
+            start = start_dt.strftime("%Y%m%d")
+            use_upsert = True
         else:
             latest = str(existing["date"].max())
             next_dt = datetime.strptime(latest, "%Y%m%d") + timedelta(days=1)
@@ -170,7 +371,18 @@ class DataSync:
                 return BackfillResult(index_code, 0, 0, 0)
 
         try:
-            df = self.kis.fetch_index_bars(index_code, start, end)
+            if source == "pykrx":
+                from . import pykrx_bars
+                df = pykrx_bars.fetch_index_bars_pykrx(index_code, start, end)
+                # ticker 컬럼을 지수에 맞게 — backfill_index는 ticker 컬럼 안 쓰지만
+                # pykrx_bars가 label을 ticker에 넣었으니 그대로 OK.
+                if not df.empty:
+                    df = df.drop(columns=["ticker"], errors="ignore")
+            elif source == "kis":
+                df = self.kis.fetch_index_bars(index_code, start, end)
+            else:
+                return BackfillResult(index_code, 0, 0, 0,
+                                       error=f"unknown source: {source!r}")
         except KISAPIError as e:
             return BackfillResult(index_code, 0, 0, 0, error=f"KIS {e.rt_cd}: {e.msg}")
         except Exception as e:
@@ -180,9 +392,14 @@ class DataSync:
         if fetched == 0:
             return BackfillResult(index_code, 0, 0, 0)
 
-        added, skipped = store.append_dedup(
-            path, df, dedup_keys=["date"], sort_keys=["date"]
-        )
+        if use_upsert:
+            added, skipped = store.upsert_dedup(
+                path, df, dedup_keys=["date"], sort_keys=["date"]
+            )
+        else:
+            added, skipped = store.append_dedup(
+                path, df, dedup_keys=["date"], sort_keys=["date"]
+            )
         return BackfillResult(index_code, added=added, skipped=skipped, fetched=fetched)
 
     def sync_indices(
@@ -191,12 +408,21 @@ class DataSync:
         *,
         years: int = 2,
         asof: str | None = None,
+        force_refresh_recent: int = 0,
+        source: str = "pykrx",
     ) -> dict:
-        """기본 4개 지수 (KOSPI/KOSDAQ/KOSPI200/KOSDAQ150) sync."""
+        """기본 4개 지수 (KOSPI/KOSDAQ/KOSPI200/KOSDAQ150) sync.
+
+        source : 'pykrx' (기본) 또는 'kis'.
+        """
         codes = index_codes or ["KOSPI", "KOSDAQ", "KOSPI200", "KOSDAQ150"]
         stats = {"total": len(codes), "updated": 0, "no_change": 0, "failed": []}
         for code in codes:
-            r = self.backfill_index(code, years=years, asof=asof)
+            r = self.backfill_index(
+                code, years=years, asof=asof,
+                force_refresh_recent=force_refresh_recent,
+                source=source,
+            )
             if r.error:
                 stats["failed"].append((code, r.error))
                 log.warning("Index %s failed: %s", code, r.error)

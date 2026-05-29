@@ -206,6 +206,18 @@ def build_fundamentals(
         if "eps" in merged.columns:
             out["eps"] = pd.to_numeric(merged["eps"], errors="coerce").values
 
+    # ROE는 *비율* (point-in-time)이라 periodize 대상 아님. 원본에서 stac_yymm 기준 raw merge.
+    # "가속화 장기투자" 탭의 펀더멘털 점수(5년 ROE 평균)에서 사용.
+    if financial_ratios_q is not None and "roe_val" in financial_ratios_q.columns:
+        rr_raw = financial_ratios_q[["stac_yymm", "roe_val"]].copy()
+        rr_raw["roe"] = pd.to_numeric(rr_raw["roe_val"], errors="coerce")
+        merged_roe = pd.merge(
+            out, rr_raw[["stac_yymm", "roe"]],
+            left_on=out["year"].astype(str) + (out["q"] * 3).astype(str).str.zfill(2),
+            right_on="stac_yymm", how="left",
+        )
+        out["roe"] = merged_roe["roe"].values
+
     # YoY 계산: (year-1, same q) 매칭. shift(4)는 분기 누락 시 엉뚱한 행과 비교됨.
     out = out.sort_values(["year", "q"]).reset_index(drop=True)
     _attach_yoy_by_year_q(out, [("revenue", "revenue_yoy"),

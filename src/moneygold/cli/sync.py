@@ -47,6 +47,12 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--indices", action="store_true", help="지수만 sync")
     mode.add_argument("--financials", action="store_true", help="펀더멘털만 sync (KIS finance 분기)")
     mode.add_argument("--consensus", action="store_true", help="컨센서스만 sync (yfinance, 대형주 위주)")
+    mode.add_argument("--dividends", action="store_true",
+                      help='"가속화 장기투자" 탭용 배당 이력 sync (pykrx 펀더멘털, 최근 N년)')
+    mode.add_argument("--dart-indicators", action="store_true",
+                      help='"가속화 장기투자" 탭용 DART 재무지표 sync (ROE 등, 최근 5년)')
+    mode.add_argument("--dart-business", action="store_true",
+                      help='DART 사업보고서 주요사항 sync (증자/감자, 자기주식, 회사정보, raw 재무제표)')
     mode.add_argument("--us", action="store_true",
                       help="미국 시스템 전체 sync: 마스터 + 일봉 + 지수 + 분기재무 + 컨센서스")
     mode.add_argument("--us-kis-crosscheck", action="store_true",
@@ -67,6 +73,14 @@ def main(argv: list[str] | None = None) -> int:
                         help="--us 모드 mcap 컷오프 (USD). 기본은 config의 US_MCAP_MIN_USD.")
     parser.add_argument("--no-batch", action="store_true",
                         help="--us 모드에서 ticker별 fetch (느림). 기본은 yf.download 배치 (~5-10배 빠름).")
+    parser.add_argument("--scope", choices=["all", "k200kq150"], default="all",
+                        help="--dart-business 종목 범위. k200kq150 = KOSPI200+KOSDAQ150만.")
+    parser.add_argument(
+        "--force-refresh-recent", type=int, default=None,
+        help="최근 N거래일을 강제 다시 fetch + 덮어쓰기. "
+             "휴장/부분집계로 잘못 저장된 행 정정용. "
+             "기본: --daily/--indices 모드에서 5, 그 외 0. 명시 시 그 값 사용.",
+    )
     args = parser.parse_args(argv)
 
     cfg = load_config()
@@ -74,8 +88,18 @@ def main(argv: list[str] | None = None) -> int:
     log = logging.getLogger("moneygold.cli.sync")
 
     # 모드 디폴트
-    if not (args.universe or args.backfill or args.daily or args.indices or args.financials or args.consensus or args.us or args.us_kis_crosscheck):
+    if not (args.universe or args.backfill or args.daily or args.indices or args.financials or args.consensus or args.dividends or args.dart_indicators or args.dart_business or args.us or args.us_kis_crosscheck):
         args.daily = True
+
+    # force_refresh_recent 기본값:
+    #   --daily / --indices : 5 (휴장 패딩/부분집계 자동 정정)
+    #   --backfill          : 0 (전체 재 fetch 라 의미 없음)
+    #   그 외                : 0
+    if args.force_refresh_recent is None:
+        if args.daily or args.indices:
+            args.force_refresh_recent = 5
+        else:
+            args.force_refresh_recent = 0
 
     kis = KISClient(cfg.kis)
     sync = DataSync(kis, Path(cfg.data_dir))
@@ -140,7 +164,7 @@ def main(argv: list[str] | None = None) -> int:
         from .. import consensus as cons
         log.info("== sync_consensus (yfinance) ==")
         master = sync.load_universe()
-        rows = list(zip(master["ticker"], master["market"]))
+        rows = list(zip(master["ticker"], master["market"], strict=False))
         if args.tickers:
             wanted = set(_parse_tickers_arg(args.tickers) or [])
             rows = [(t, m) for t, m in rows if t in wanted]
@@ -186,10 +210,125 @@ def main(argv: list[str] | None = None) -> int:
                 log.warning("  %s: %s", tk, err)
         return 0
 
+    # 배당 이력 ("가속화 장기투자" 탭용)
+    if args.dividends:
+        from datetime import datetime as _dt
+
+        from ..data import dividends as div
+
+        asof = args.asof or _dt.now().strftime("%Y%m%d")
+        # DGI는 5년 CAGR + 10년 연속 인상까지 보므로 기본 11년.
+        # --years 의 argparse 기본값 2(backfill용)와 충돌하므로 명시적으로 11로 덮어쓰고,
+        # 사용자가 --years를 의도적으로 다르게 줬을 때만 그 값을 사용한다.
+        years = args.years if args.years and args.years != 2 else 11
+        log.info("== sync_dividends (asof=%s, years=%d) ==", asof, years)
+        if args.tickers:
+            # 사용자가 명시한 종목은 master에 없어도 그대로 사용 (master가 오래되거나 누락 가능)
+            tickers = _parse_tickers_arg(args.tickers) or []
+        else:
+            master = sync.load_universe()
+            master = master[master["market"].isin(["KOSPI", "KOSDAQ"])]
+            if args.limit:
+                master = master.head(args.limit)
+            tickers = master["ticker"].tolist()
+        log.info("Target: %d KR tickers (source=pykrx_batch)", len(tickers))
+        stats = div.sync_dividends(Path(cfg.data_dir), tickers, asof=asof, years=years,
+                                    source="pykrx_batch")
+        log.info("Dividends: total=%d updated=%d no_data=%d failed=%d",
+                 stats["total"], stats["updated"], stats["no_data"], len(stats["failed"]))
+        for tk, err in stats["failed"][:10]:
+            log.warning("  %s: %s", tk, err)
+        return 0
+
+    # DART 재무지표 ("가속화 장기투자" 펀더멘털 점수용)
+    if args.dart_indicators:
+        from datetime import datetime as _dt
+
+        from ..data import dart_indicators as di
+        from ..strategies.value_long_term.dart_client import DartClient
+
+        asof = args.asof or _dt.now().strftime("%Y%m%d")
+        years = args.years if args.years and args.years != 2 else 5
+        log.info("== sync_dart_indicators (asof=%s, years=%d) ==", asof, years)
+        if not cfg.dart.api_key:
+            log.error("DART_API_KEY 미설정. .env에 키 추가 후 재실행.")
+            return 1
+        try:
+            dart = DartClient(cfg.dart, Path(cfg.data_dir))
+        except ValueError as e:
+            log.error("DART 초기화 실패: %s", e)
+            return 1
+        if args.tickers:
+            tickers = _parse_tickers_arg(args.tickers) or []
+        elif args.scope == "k200kq150":
+            from ..data import dart_business as db
+            log.info("KOSPI200 + KOSDAQ150 구성 종목 fetch...")
+            tickers = db.kospi200_kosdaq150_tickers(asof=asof)
+            log.info("→ %d 종목", len(tickers))
+        else:
+            master = sync.load_universe()
+            master = master[master["market"].isin(["KOSPI", "KOSDAQ"])]
+            if args.limit:
+                master = master.head(args.limit)
+            tickers = master["ticker"].tolist()
+        log.info("Target: %d KR tickers", len(tickers))
+        stats = di.sync_dart_indicators(dart, Path(cfg.data_dir), tickers,
+                                         asof=asof, years=years)
+        log.info("DART indicators: total=%d updated=%d no_data=%d failed=%d",
+                 stats["total"], stats["updated"], stats["no_data"], len(stats["failed"]))
+        for tk, err in stats["failed"][:10]:
+            log.warning("  %s: %s", tk, err)
+        return 0
+
+    # DART 사업보고서 주요사항 (증자/자사주/회사정보/raw 재무제표)
+    if args.dart_business:
+        from datetime import datetime as _dt
+
+        from ..data import dart_business as db
+        from ..strategies.value_long_term.dart_client import DartClient
+
+        asof = args.asof or _dt.now().strftime("%Y%m%d")
+        years = args.years if args.years and args.years != 2 else 5
+        log.info("== sync_dart_business (asof=%s, years=%d, scope=%s) ==",
+                 asof, years, args.scope)
+        if not cfg.dart.api_key:
+            log.error("DART_API_KEY 미설정. .env에 키 추가 후 재실행.")
+            return 1
+        try:
+            dart = DartClient(cfg.dart, Path(cfg.data_dir))
+        except ValueError as e:
+            log.error("DART 초기화 실패: %s", e)
+            return 1
+        if args.tickers:
+            tickers = _parse_tickers_arg(args.tickers) or []
+        elif args.scope == "k200kq150":
+            log.info("KOSPI200 + KOSDAQ150 구성 종목 fetch (pykrx)...")
+            tickers = db.kospi200_kosdaq150_tickers(asof=asof)
+            log.info("→ %d 종목 (KOSPI200 ∪ KOSDAQ150)", len(tickers))
+        else:
+            master = sync.load_universe()
+            master = master[master["market"].isin(["KOSPI", "KOSDAQ"])]
+            if args.limit:
+                master = master.head(args.limit)
+            tickers = master["ticker"].tolist()
+        if args.limit:
+            tickers = tickers[: args.limit]
+        log.info("Target: %d tickers", len(tickers))
+        stats = db.sync_dart_business(dart, Path(cfg.data_dir), tickers,
+                                       asof=asof, years=years)
+        log.info("DART business: total=%d updated=%d no_data=%d failed=%d",
+                 stats["total"], stats["updated"], stats["no_data"], len(stats["failed"]))
+        for tk, err in stats["failed"][:10]:
+            log.warning("  %s: %s", tk, err)
+        return 0
+
     # 지수만
     if args.indices:
-        log.info("== sync_indices ==")
-        stats = sync.sync_indices(years=args.years, asof=args.asof)
+        log.info("== sync_indices (force_refresh_recent=%d) ==", args.force_refresh_recent)
+        stats = sync.sync_indices(
+            years=args.years, asof=args.asof,
+            force_refresh_recent=args.force_refresh_recent,
+        )
         log.info("Indices: total=%d updated=%d no_change=%d failed=%d",
                  stats["total"], stats["updated"], stats["no_change"], len(stats["failed"]))
         for code, err in stats["failed"]:
@@ -213,23 +352,58 @@ def main(argv: list[str] | None = None) -> int:
     if args.limit:
         tickers = tickers[: args.limit]
 
-    log.info("== sync_bars_all (%d tickers, years=%d, asof=%s) ==",
-             len(tickers), args.years, args.asof or "today")
-    stats = sync.sync_bars_all(tickers, years=args.years, asof=args.asof)
+    # --daily 모드 + 전체 KR 종목 (--tickers 지정 안 함) → pykrx batch 사용 (200배 빠름)
+    # 다른 경우 (특정 ticker / --backfill) 는 종목별 backfill 유지
+    use_kr_batch = (
+        args.daily and not args.tickers and not args.limit
+        and args.force_refresh_recent > 0
+    )
+    if use_kr_batch:
+        log.info("== sync_bars_kr_pykrx_batch (KR 전체, recent_days=%d) ==",
+                 args.force_refresh_recent)
+        bs = sync.sync_bars_kr_pykrx_batch(
+            recent_days=args.force_refresh_recent, asof=args.asof,
+        )
+        log.info("KR Bars (pykrx batch): touched=%d rows=%d days_fetched=%d errors=%d",
+                 bs["tickers_touched"], bs["total_rows"], bs["days_fetched"], len(bs["errors"]))
+        for k, v in bs["errors"][:10]:
+            log.warning("  %s: %s", k, v)
+        # US 종목 별도 처리 — yfinance batch (sync_bars_all_us 가 이미 batch 모드)
+        us_tickers = [t for t in tickers if (master[master["ticker"]==t]["market"].iloc[0] == "US")] if not args.tickers else []
+        if us_tickers:
+            log.info("== sync_bars_all_us (US %d 종목, yfinance batch) ==", len(us_tickers))
+            us_stats = sync.sync_bars_all_us(us_tickers, batch=True)
+            log.info("US Bars: total=%d updated=%d no_change=%d failed=%d",
+                     us_stats["total"], us_stats["updated"], us_stats["no_change"], len(us_stats["failed"]))
+    else:
+        log.info("== sync_bars_all (%d tickers, years=%d, asof=%s, force_refresh_recent=%d) ==",
+                 len(tickers), args.years, args.asof or "today", args.force_refresh_recent)
+        stats = sync.sync_bars_all(
+            tickers, years=args.years, asof=args.asof,
+            force_refresh_recent=args.force_refresh_recent,
+        )
+        log.info("Bars: total=%d updated=%d no_change=%d failed=%d",
+                 stats["total"], stats["updated"], stats["no_change"], len(stats["failed"]))
+        if stats["failed"]:
+            log.warning("Failed tickers (first 20):")
+            for tk, err in stats["failed"][:20]:
+                log.warning("  %s: %s", tk, err)
 
-    log.info("Bars: total=%d updated=%d no_change=%d failed=%d",
-             stats["total"], stats["updated"], stats["no_change"], len(stats["failed"]))
-    if stats["failed"]:
-        log.warning("Failed tickers (first 20):")
-        for tk, err in stats["failed"][:20]:
-            log.warning("  %s: %s", tk, err)
-
-    # 3) 지수
+    # 3) 지수 — --daily 도 pykrx batch 사용
     if not args.skip_indices and not args.tickers:
-        log.info("== sync_indices ==")
-        istats = sync.sync_indices(years=args.years, asof=args.asof)
-        log.info("Indices: total=%d updated=%d no_change=%d failed=%d",
-                 istats["total"], istats["updated"], istats["no_change"], len(istats["failed"]))
+        if use_kr_batch:
+            log.info("== sync_indices_kr_pykrx (recent_days=%d) ==", args.force_refresh_recent)
+            istats = sync.sync_indices_kr_pykrx(recent_days=args.force_refresh_recent, asof=args.asof)
+            log.info("Indices (pykrx): updated=%d no_change=%d failed=%d",
+                     istats["updated"], istats["no_change"], len(istats["failed"]))
+        else:
+            log.info("== sync_indices (force_refresh_recent=%d) ==", args.force_refresh_recent)
+            istats = sync.sync_indices(
+                years=args.years, asof=args.asof,
+                force_refresh_recent=args.force_refresh_recent,
+            )
+            log.info("Indices: total=%d updated=%d no_change=%d failed=%d",
+                     istats["total"], istats["updated"], istats["no_change"], len(istats["failed"]))
         for code, err in istats["failed"]:
             log.warning("  %s: %s", code, err)
 
