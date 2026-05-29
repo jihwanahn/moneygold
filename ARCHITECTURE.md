@@ -51,61 +51,69 @@ v1.1. 시그널 생성기 — **자동 주문 없음, 수동 매매 보조 도�
 
 ## 2. 데이터 레이어
 
-### 1차 출처: KIS Open API (한국투자증권, **read-only 사용**)
+데이터 출처는 **목적별 분담**. KIS는 사실상 잔고만 담당 (PR-F~I에서 KRX 통신을 직접 쓰는 pykrx/DART로 마이그레이션 완료).
 
-| 용도 | 엔드포인트 (개념) | PR0 검증 필요 |
+### 1차 출처: pykrx (KRX 직접 통신)
+
+| 용도 | 함수 | 비고 |
 | --- | --- | --- |
-| 일봉 OHLCV (수정주가) | `inquire-daily-itemchartprice` 또는 장기용 별도 | **2년 백필 가능 여부** |
-| 투자자별 매매동향 | `inquire-investor` | 일별 외인/기관/개인 순매수 추출 |
-| 종목 기본정보 | `search-stock-info` | 관리/경고/거래정지 플래그 |
-| 계좌 잔고 (read-only) | `inquire-balance` | 보유 종목/평단/수량 |
+| **종목 마스터** | `get_market_ticker_list(market=KOSPI/KOSDAQ)` | KOSPI + KOSDAQ 보통주. 거래정지/액면병합 직후 일시 누락 가능 → `_REIT_NAME` 필터 false positive에 유의 (예: "메리츠"의 "리츠" 매치 → `(?<!메)리츠`로 보호) |
+| **일봉 OHLCV** | `get_market_ohlcv_by_date(start, end, ticker, adjusted=True)` | 수정주가. 페이지네이션 없음 (1콜 전체 기간). pykrx 응답이 가끔 거래대금 컬럼을 누락하므로 정규화 시 0 fill |
+| **지수 일봉** | `get_index_ohlcv_by_date(start, end, code)` | KOSPI=1001, KOSDAQ=2001, KOSPI200=1028, KOSDAQ150=2203 (KIS와 코드 체계 다름) |
+| **연간 DPS / PER / PBR / EPS / BPS / DIV (종목별)** | `get_market_fundamental_by_date` | 트레일링 12개월 누적. **12월 마지막 거래일의 DPS = (year-1) 회계연도 결산배당**으로 귀속 |
+| **연간 DPS / DIV / EPS / BPS (일별 전종목 batch)** | `get_market_fundamental(date, market)` | 한 호출에 그 날 전 KR 종목 fundamental. 매 연도 12월말 × 2시장 = 24 호출로 11년치 전종목 sync. `--dividends` 기본 source(`pykrx_batch`) — 종목별 호출(~2.5h)이 ~50초로 단축 |
+| **일별 batch OHLCV (전종목)** | `get_market_ohlcv(date, market=...)` | `--daily` 모드의 최근 N영업일 sync — 2 콜/일 × 5일 = 10콜로 5,800종목 처리 |
 
-**주문 엔드포인트는 사용하지 않음.** `order-cash`, 정정/취소 등 transactional API 전부 미사용.
+**KRX 인증**: pykrx는 일부 호출에 KRX 계정 필요. `.env`의 `KRX_ID`/`KRX_PW` 필수.
 
-KIS 클라이언트 운영 디테일:
-- **OAuth 토큰** TTL 24h, 1분당 재발급 1회 제한 → 디스크 캐시 (`~/.kis_token.json`), 23시간 경과 시 prefetch
+### 2차 출처: DART (금감원 전자공시)
+
+| 용도 | 엔드포인트 | 비고 |
+| --- | --- | --- |
+| **재무지표 (ROE, ROA, 이익률 등)** | `fnlttSinglIndx.json` | 사업보고서 기준 연간. DGI 펀더멘털 20점 항목 |
+| **자사주 취득/소각 공시** | `list.json` + `pblntf_detail_ty=B001` | 최근 3년 카운트. 주주환원 점수 (DGI 10점) |
+| **배당결정 공시 카운트** | `list.json` + `report_nm == '현금ㆍ현물배당결정'` | 분기/반기/연 배당 빈도 추정 (5점). 자회사·정정 공시 제외 |
+| **사업보고서 자사주 보유비율** | `document.xml` 파싱 | `SUM_TRS_RT` ACODE 우선, 없으면 `SUM_TRS_STK / (SUM_TRS_STK + SUM_FLT_STK)` |
+| **회사 기본정보** | `company.json` | corp_name / ceo_nm / est_dt / induty_code / IR URL. Streamlit 상세 화면 |
+| **증자/감자 이력** | `irdsSttus.json` | 일자별 유상증자/주식배당/무상증자 등. 사업보고서 단위 (5년치 ≈ 회사 설립부터 누적) |
+| **자기주식 흐름** | `tesstkAcqsDspsSttus.json` | 사업보고서 단위 기초/취득/처분/기말 수량 |
+| **원본 재무제표 전체** | `fnlttSinglAcntAll.json` (fs_div=CFS/OFS) | 재무상태표 + 손익 + 현금흐름 + 자본변동 raw 계정 (종목당 ~1,000행). CFS(연결) 우선, 없으면 OFS(별도) fallback |
+| corp_code 매핑 | `corpCode.xml` (zip) | 전체 종목 1회 다운로드 후 `store/dart_cache/corp_codes.json` 영속 |
+
+**권한 한계**: 기본키로 가능. 일부 endpoint (`cashDvdndDcsn.json`, `affiliation.json` 등)는 status=101 "잘못된 URL"로 거절 → `list.json` 기반 우회.
+
+### 3차 출처: KIS Open API (잔고 전용)
+
+| 용도 | 엔드포인트 | 비고 |
+| --- | --- | --- |
+| **계좌 잔고 (read-only)** | `inquire-balance` | 보유 종목/평단/수량. pykrx 미제공이라 KIS만이 유일한 출처 |
+
+**주문 엔드포인트는 절대 사용 안 함.** `order-cash`, 정정/취소 등 transactional API 전부 미사용.
+
+KIS 클라이언트 운영 디테일은 잔고 sync에 한정해서만 적용:
+- **OAuth 토큰** TTL 24h, 디스크 캐시 (`~/.kis_token.json`)
 - **Rate limit 20 req/s/app key** → 토큰 버킷 throttle
-- **`tr_id` 헤더** 엔드포인트별 매핑 테이블 (실전 키만 보유 → 실전 tr_id만)
-- **연속조회 (`tr_cont` / `ctx_area_*`)** 페이지네이션
-- **base URL** 실전: `https://openapi.koreainvestment.com:9443`. 모의 사용 안 함.
+- **base URL**: `https://openapi.koreainvestment.com:9443` (실전만)
 
-### PR0 검증 결과 (확정)
+> 일봉/지수/재무 KIS fetcher (`fetch_daily_bars`, `fetch_index_bars`, `fetch_finance_table` 등)는 호환성을 위해 코드는 보존하되 `source="kis"` 옵션으로만 호출 가능. 기본 `source="pykrx"` 또는 DART.
 
-`scripts/verify_kis.py` 실행으로 확정된 사실:
-
-1. **2년 일봉 백필 → 페이지네이션 필요.** `inquire-daily-itemchartprice`는 한 호출에 최근 100영업일치(약 5개월)만 반환. `tr_cont` 헤더가 안 붙음. 2년치(약 500영업일)는 **요청 기간을 잘라가며 5회 반복 호출**로 받는다:
-   - 최초: `FID_INPUT_DATE_2 = 오늘`, `FID_INPUT_DATE_1 = 오늘-730일`
-   - 다음: 받은 응답의 가장 *오래된* 날짜 - 1영업일을 새 `FID_INPUT_DATE_2`로, 같은 시작일 유지
-   - 반환 rows가 0이거나 누적 기간이 목표에 도달하면 종료
-   - 호출당 0.3초 throttle 가정 시 종목당 약 2초
-
-2. **종목 마스터 → pykrx 전용 의존성.** KIS는 전종목 리스트 미제공 확정. `pykrx.stock.get_market_ticker_list(market='KOSPI'|'KOSDAQ')` 를 마스터 sync에서만 호출. 본 문서의 "pykrx 미사용" 원칙을 **"pykrx는 종목 마스터에 한정 사용"** 으로 완화.
-
-3. **상장폐지 종목 과거 데이터 → KIS 미제공 (확정).** 폐지된 종목(037160 등)은 응답이 빈 배열. 동일 코드가 재할당된 경우(011000, 003540)는 새 회사의 데이터만 옴. **v1 백테스트는 "현재 상장 중인 종목"만으로 시뮬레이션**하고, 결과 리포트 헤더에 *낙관적 생존편향* 경고를 명시. KRX 폐지 데이터 확보는 v2 과제.
-
-### 2차 출처: korea-stock-analyzer MCP
+### 4차 출처: korea-stock-analyzer MCP (보조)
 
 | 도구 | 용도 |
 | --- | --- |
-| `get_supply_demand` | 외인/기관 누적 순매수 — Stage 2 강화 신호 (KIS `inquire-investor`와 교차검증, 더 풍부한 쪽 채택) |
-| `get_financial_data` | Minervini growth 오버레이 (분기 EPS/매출 가속) |
-| `search_news` | BUY 시그널 사이드카 (부정 키워드 빨간 배지) |
-| `compare_peers` | (v2+) Minervini "Industry Leader" 체크 |
-| `analyze_equity` / `calculate_dcf` / `get_technical_indicators` | **사용 안 함** — 전략 특화 지표는 자체 구현 |
+| `search_news` | BUY 시그널 사이드카 (부정 키워드 빨간 배지) — 단 더미 데이터 응답 가능성 ↑ |
+| `get_supply_demand` | 외인/기관 누적 순매수 (옵션, 미구현) |
+| `analyze_equity` / `calculate_dcf` / `get_technical_indicators` / `get_financial_data` | **사용 안 함** — pykrx 의존 도구는 PythonExecutor stdout 파싱 충돌로 깨짐 |
 
-MCP 결과는 모두 로컬 캐시 (`store/mcp_cache/{tool}/{asof}__{ticker}.json`). 같은 (도구, 날짜, 종목) 조합은 두 번 안 부른다.
+MCP 결과는 로컬 캐시 (`store/mcp_cache/{tool}/{asof}__{ticker}.json`).
 
-### 3차 출처: pykrx — 종목 마스터 전용
+### PR0 검증 결과 (히스토릭)
 
-PR0 검증 결과(§2)에 따라 **종목 마스터 sync에 한정**해서 사용. 시세·수급·잔고는 KIS, 펀더멘털·뉴스는 MCP. 즉 pykrx는 `universe.py`의 마스터 갱신 1군데만.
+`scripts/verify_kis.py` 실행으로 확정됐던 사실들. 일부는 PR-F~I로 마이그레이션 후 더 이상 적용 안 됨:
 
-```python
-from pykrx import stock
-kospi_tickers = stock.get_market_ticker_list(market="KOSPI")
-kosdaq_tickers = stock.get_market_ticker_list(market="KOSDAQ")
-```
-
-마스터 갱신은 일주일 1회 또는 거래일 시작 시 1회면 충분 (신규 상장은 흔치 않음). pykrx의 KRX 스크래핑이 깨질 가능성 — 갱신 실패 시 기존 마스터로 운영 계속, 알림으로 경고.
+1. ~~**2년 일봉 백필 → 페이지네이션 필요**~~ — PR-F로 pykrx 전환되어 1콜로 처리. KIS 페이지네이션 코드는 `source="kis"` fallback에만 사용.
+2. **종목 마스터 → pykrx 전용 의존성** (그대로) + PR-F~I 이후 pykrx 의존 범위 확장.
+3. **상장폐지 종목 과거 데이터 → KIS/pykrx 모두 미제공** — v1 백테스트는 *현재 상장 중인 종목*만, 결과 리포트 헤더에 *낙관적 생존편향* 경고. KRX 폐지 데이터 확보는 v2 과제.
 
 ### 로컬 데이터 스토어
 
@@ -117,6 +125,16 @@ store/
   meta/master.parquet             # ticker, name, market, sector, listed_date, delisted_date
   meta/flags.parquet              # asof, ticker, flag (관리/경고/위험/정지)
   flows/{ticker}.parquet          # date, foreign_net_krw, institution_net_krw, individual_net_krw
+  financials/{ticker}.parquet     # 분기 손익 + ROE (KIS — 레거시, --financials 모드)
+  dividends/{ticker}.parquet      # pykrx 출처 배당 이력 (fiscal_year 컬럼 채워짐) + KIS legacy 행 공존 가능 — scoring은 pykrx 우선
+  dart_cache/                     # DART corp_codes.json + treasury_activity/holding/dividend_decisions JSON 캐시
+  dart_indicators/{ticker}.parquet  # DART fnlttSinglIndx.json 결과 (연도별 ROE 등)
+  dart_business/                  # DART 사업보고서 주요사항 (KOSPI200+KOSDAQ150 한정 sync)
+    company_info/{ticker}.json    # company.json — corp_name/ceo_nm/est_dt/induty 등
+    share_issuance/{ticker}.parquet   # irdsSttus.json — 증자/감자 이력
+    treasury_status/{ticker}.parquet  # tesstkAcqsDspsSttus.json — 자사주 흐름
+    financials_raw/{ticker}.parquet   # fnlttSinglAcntAll.json — 재무제표 전체 raw
+  value_scores/{asof}.parquet     # DGI screen 결과 (cli.dgi)
   mcp_cache/{tool}/{key}.json
   signals/{biz_date}.json         # 일일 시그널 (PR3+)
   portfolio.json                  # 메타데이터 캐시 (정의는 §8 참조)
@@ -144,6 +162,8 @@ store/
 | `volume_ratio(vol, n=50)` | `vol / sma(vol, n)` |
 
 **RS rank는 시장별 분리 계산.** KOSPI 종목은 KOSPI200 지수 대비 RS line → KOSPI 종목들끼리 백분위. KOSDAQ도 동일. 두 그룹 백분위를 그대로 사용 (시장 간 합산 랭킹 X).
+
+**섹터 RS rank (WatchlistEntry.sector_rs_rank).** 같은 (market, sector) 그룹 안에서만 다시 백분위. "섹터 안에서 주도주" 식별용 표시 컬럼 — 게이트 아님. peer < 10 또는 sector="UNKNOWN" 인 그룹은 NaN.
 
 **Equity 정의:** §8의 `equity_krw` = 현금 + 보유 종목 평가액(전일 종가 기준).
 
@@ -546,7 +566,15 @@ moneygold/
 `.env` (gitignored):
 
 ```ini
-# KIS (read-only)
+# KRX (pykrx 인증 — 일봉/펀더멘털/마스터)
+KRX_ID=
+KRX_PW=
+
+# DART OpenAPI (재무지표 + 자사주 + 배당결정 공시)
+DART_API_KEY=
+DART_RATE_PER_SEC=8
+
+# KIS (잔고 전용. 시세는 pykrx로 마이그레이션 완료)
 KIS_APP_KEY=
 KIS_APP_SECRET=
 KIS_ACCOUNT_NO=
