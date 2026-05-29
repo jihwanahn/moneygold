@@ -124,6 +124,9 @@ class WatchlistEntry:
     suggested_stop: float    # box_bottom 있으면 그것, 없으면 close × 0.93
     stage: int = 0           # 현재 Weinstein Stage (1~4). 0 = UNKNOWN.
     template_checks: list[bool] = field(default_factory=lambda: [False] * 8)  # 8조건 결과
+    # 섹터 내 RS 백분위 0~100. 시장 전체 대비 RS (rs_rank)와 별개 — 같은 섹터 종목들끼리만 백분위.
+    # 섹터 peer 수가 부족하거나 sector=UNKNOWN이면 NaN. "주도주" 판정에 사용.
+    sector_rs_rank: float = float("nan")
     # 펀더멘털 (캐시된 KIS finance 분기). 데이터 없으면 NaN.
     revenue_yoy: float = float("nan")        # 매출 YoY (%)
     op_income_yoy: float = float("nan")      # 영업이익 YoY (%)
@@ -132,8 +135,10 @@ class WatchlistEntry:
     growth_quarters: int = 0                  # 연속 매출 성장 분기 수
     op_growth_quarters: int = 0               # 연속 영업이익 성장 분기 수
     accelerating: bool = False                # YoY 가속 여부
-    # 거래량 수급 — 20일 평균 거래량 / 60일 평균. >1.1: 누적 매수, <0.9: 이탈.
-    # bars[volume]만 가지고 계산하므로 KR/US 모두 적용. 향후 pykrx 외인/기관 수급 데이터로 보강 예정.
+    # 거래량 수급 — 20일 평균 거래량 / 60일 평균.
+    # 📊 데이터 (52K obs, 6년): U-shape — ≥1.4 강한 누적 (+30d alpha +2.97%p),
+    # <0.7 조용한 누적 (+2.72%p, 직관 반대), 1.0~1.3 평범 (~+1.5%p).
+    # 임의 1.1/1.2 임계는 의미 미미. bars[volume]만 사용 → KR/US 공통.
     vol_acc_ratio: float = float("nan")
     # 컨센서스 (캐시된 yfinance). 데이터 없으면 NaN/None.
     cons_n_analysts: int = 0
@@ -174,6 +179,7 @@ def generate_signals(
     idx_close_by_market: dict[str, pd.Series],
     cfg: AppConfig,
     rs_momentum_map: dict[str, float] | None = None,
+    sector_rs_rank_map: dict[str, float] | None = None,
     fundamentals_map: dict[str, fund.FundamentalsResult] | None = None,
     consensus_map: dict[str, cons.ConsensusResult] | None = None,
     allowed_stages: tuple[int, ...] | None = None,
@@ -257,7 +263,7 @@ def generate_signals(
         # ---------- 보유 종목: HOLD/SELL ----------
         if td.ticker in portfolio:
             pos = portfolio[td.ticker]
-            sell, hold = _evaluate_position(bars, pos, asof, td)
+            sell, hold = _evaluate_position(bars, pos, asof, td, cfg=cfg)
             if sell is not None:
                 sells.append(sell)
             elif hold is not None:
@@ -294,8 +300,12 @@ def generate_signals(
         last_close = float(bars["close"].iloc[-1])
         suggested_stop = float(box_for_watch.bottom) if box_for_watch.bottom is not None else last_close * 0.93
         rs_mom_value = float(rs_momentum_map.get(td.ticker, float("nan"))) if rs_momentum_map else float("nan")
+        sector_rs_rank_value = (
+            float(sector_rs_rank_map.get(td.ticker, float("nan"))) if sector_rs_rank_map else float("nan")
+        )
 
-        # 거래량 수급/이탈 비율: 최근 20일 평균 / 최근 60일 평균. 1.1↑ 누적, 0.9↓ 이탈.
+        # 거래량 수급/이탈 비율: 최근 20일 평균 / 최근 60일 평균.
+        # 데이터 검증: U-shape — ≥1.4 강한 누적 / <0.7 조용한 누적이 양 극단 alpha 정점.
         # bars[volume]에 기반 — KR/US 공통 적용 가능. NaN-safe.
         vol_acc_ratio = float("nan")
         if "volume" in bars.columns and len(bars) >= 60:
@@ -354,6 +364,7 @@ def generate_signals(
             suggested_stop=suggested_stop,
             stage=int(stage_val),
             template_checks=list(t.checks),
+            sector_rs_rank=sector_rs_rank_value,
             revenue_yoy=f_revenue_yoy, op_income_yoy=f_op_yoy, op_margin=f_op_margin,
             net_margin=f_net_margin,
             growth_quarters=f_growth_q, op_growth_quarters=f_op_growth_q,
@@ -471,6 +482,7 @@ def _evaluate_position(
     pos: PositionMeta,
     asof: str,
     td: TickerData,
+    cfg: AppConfig | None = None,
 ) -> tuple[SellSignal | None, HoldSignal | None]:
     close = bars["close"].astype(float)
     last_close = float(close.iloc[-1])
@@ -512,6 +524,17 @@ def _evaluate_position(
     if box.state == darvas.CONFIRMED and box.bottom is not None and box.bottom > pos.current_stop:
         new_stop = float(box.bottom)
         trail_updated = True
+
+    # 옵션: MA20 trailing (Momentum Breakout 스타일). cfg.strategy.momo_trailing_exit=True 일 때만.
+    # Darvas 박스 갱신과 *공존* — 둘 중 더 높은 값으로 ratchet (절대 후퇴 X).
+    if cfg is not None and getattr(cfg.strategy, "momo_trailing_exit", False):
+        ma_period = int(getattr(cfg.strategy, "momo_trailing_ma_period", 20))
+        ma_series = ind.sma(close, ma_period)
+        if pd.notna(ma_series.iloc[-1]):
+            ma_val = float(ma_series.iloc[-1])
+            if ma_val > new_stop:
+                new_stop = ma_val
+                trail_updated = True
 
     days_held = 0
     try:

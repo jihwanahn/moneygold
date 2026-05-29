@@ -110,10 +110,13 @@ def _build_ticker_data(
 def _compute_rs_maps(
     tickers: list[sg.TickerData],
     sma_window_for_min_data: int = 252,
-) -> tuple[dict[str, float], dict[str, float]]:
-    """모든 종목의 rs_momentum 계산 + 시장별 횡단면 백분위.
+    sector_map: dict[str, str] | None = None,
+    min_sector_peers: int = 10,
+) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
+    """모든 종목의 rs_momentum 계산 + 시장별/섹터별 횡단면 백분위.
 
-    Returns (rs_rank_map, rs_momentum_map).
+    Returns (rs_rank_map, rs_momentum_map, sector_rs_rank_map).
+    sector_map이 없거나 섹터 peer < min_sector_peers면 sector_rs_rank_map은 해당 종목 NaN.
     """
     rows = []
     for td in tickers:
@@ -125,14 +128,30 @@ def _compute_rs_maps(
         rows.append({"ticker": td.ticker, "market": td.market, "rs_momentum": rs_mom})
 
     if not rows:
-        return {}, {}
+        return {}, {}, {}
     df = pd.DataFrame(rows)
     df["rs_rank"] = float("nan")
     for market, group in df.groupby("market"):
         df.loc[group.index, "rs_rank"] = ind.rs_rank(group["rs_momentum"]).values
     rank_map = dict(zip(df["ticker"], df["rs_rank"]))
     mom_map = dict(zip(df["ticker"], df["rs_momentum"]))
-    return rank_map, mom_map
+
+    sector_rank_map: dict[str, float] = {}
+    if sector_map:
+        df["sector"] = df["ticker"].map(sector_map).fillna("UNKNOWN").astype(str)
+        df["sector_rs_rank"] = float("nan")
+        for (_mkt, sector), group in df.groupby(["market", "sector"]):
+            if sector == "UNKNOWN":
+                continue
+            valid = group["rs_momentum"].notna().sum()
+            if valid < min_sector_peers:
+                continue
+            df.loc[group.index, "sector_rs_rank"] = ind.rs_rank(group["rs_momentum"]).values
+        sector_rank_map = {
+            t: float(v) for t, v in zip(df["ticker"], df["sector_rs_rank"])
+            if pd.notna(v)
+        }
+    return rank_map, mom_map, sector_rank_map
 
 
 def _print_report(sigs: sg.DailySignals, master: pd.DataFrame, watchlist_top: int = 30) -> None:
@@ -157,7 +176,7 @@ def _print_report(sigs: sg.DailySignals, master: pd.DataFrame, watchlist_top: in
     if sigs.watchlist:
         shown = sigs.watchlist[:watchlist_top]
         print(f"[BUY 후보 풀 — Stage/Template 게이트 통과, RS desc TOP {len(shown)}/{len(sigs.watchlist)}]")
-        print(f"  {'ticker':>7} {'name':>12} {'mkt':>6} {'RS':>6} {'rs_mom':>7} "
+        print(f"  {'ticker':>7} {'name':>12} {'mkt':>6} {'RS':>6} {'secRS':>6} {'rs_mom':>7} "
               f"{'close':>10} {'box':>12} {'box top':>10} {'box bot':>10} {'days':>5} {'stop hint':>10}")
         for w in shown:
             box_top_str = f"{w.box_top:,.0f}" if w.box_top is not None else "-"
@@ -166,7 +185,8 @@ def _print_report(sigs: sg.DailySignals, master: pd.DataFrame, watchlist_top: in
                 "•" if w.box_state == "CONFIRMED" else " "
             )
             mom_str = f"{w.rs_momentum:>+6.2f}" if not pd.isna(w.rs_momentum) else "    -"
-            print(f"  {w.ticker:>7} {w.name[:12]:>12} {w.market:>6} {w.rs_rank:>6.1f} {mom_str:>7} "
+            sec_str = f"{w.sector_rs_rank:>6.1f}" if not pd.isna(w.sector_rs_rank) else "     -"
+            print(f"  {w.ticker:>7} {w.name[:12]:>12} {w.market:>6} {w.rs_rank:>6.1f} {sec_str:>6} {mom_str:>7} "
                   f"{w.close:>10,.0f} {marker} {w.box_state[:10]:>10} "
                   f"{box_top_str:>10} {box_bot_str:>10} {w.days_in_box:>5} {w.suggested_stop:>10,.0f}")
         print()
@@ -244,8 +264,17 @@ def main(argv: list[str] | None = None) -> int:
     log.info("Loaded %d / %d tickers", len(tickers), len(master))
 
     log.info("Computing RS rank ...")
-    rs_rank_map, rs_momentum_map = _compute_rs_maps(tickers)
-    log.info("RS rank computed for %d tickers", len(rs_rank_map))
+    sector_map = (
+        dict(zip(master["ticker"], master["sector"]))
+        if "sector" in master.columns else None
+    )
+    rs_rank_map, rs_momentum_map, sector_rs_rank_map = _compute_rs_maps(
+        tickers, sector_map=sector_map,
+    )
+    log.info(
+        "RS rank computed for %d tickers (sector RS for %d)",
+        len(rs_rank_map), len(sector_rs_rank_map),
+    )
 
     portfolio_path = data_dir / "portfolio.json"
     portfolio = _load_portfolio(portfolio_path)
@@ -306,6 +335,7 @@ def main(argv: list[str] | None = None) -> int:
     sigs = sg.generate_signals(
         asof, tickers, portfolio, rs_rank_map, idx_close_by_market, cfg,
         rs_momentum_map=rs_momentum_map,
+        sector_rs_rank_map=sector_rs_rank_map,
         fundamentals_map=fundamentals_map,
         consensus_map=consensus_map,
         allowed_stages=stages_override,
