@@ -48,6 +48,25 @@ def test_filter_master_drops_reit(monkeypatch):
     assert "330590" not in set(out["ticker"])
 
 
+def test_filter_master_does_not_drop_meritz(monkeypatch):
+    """회귀 방지: '메리츠'에 '리츠'가 포함되지만 REIT가 아님 (금융지주).
+    negative lookbehind로 메리츠 계열은 통과해야.
+    """
+    monkeypatch.setattr(universe, "_fetch_etp_tickers", lambda: set())
+    df = pd.DataFrame([
+        {"ticker": "138040", "name": "메리츠금융지주", "market": "KOSPI"},
+        {"ticker": "330590", "name": "롯데리츠", "market": "KOSPI"},           # 실제 REIT
+        {"ticker": "293940", "name": "신한알파리츠", "market": "KOSPI"},        # 실제 REIT
+        {"ticker": "140910", "name": "이리츠코크렙", "market": "KOSPI"},        # 실제 REIT (이리츠도 통과해야)
+    ])
+    out = universe.filter_master(df)
+    survived = set(out["ticker"])
+    assert "138040" in survived, "메리츠금융지주는 살아남아야"
+    assert "330590" not in survived
+    assert "293940" not in survived
+    assert "140910" not in survived
+
+
 def test_filter_master_drops_etf_etn(monkeypatch):
     monkeypatch.setattr(universe, "_fetch_etp_tickers", lambda: {"069500", "114800"})
     df = pd.DataFrame([

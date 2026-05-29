@@ -20,7 +20,10 @@ _PREFERRED_TAIL = re.compile(r"[5-9]$")
 
 # 종목명 패턴으로 제외할 비즈니스 형태
 _SPAC_NAME = re.compile(r"스팩")
-_REIT_NAME = re.compile(r"리츠")
+# negative lookbehind로 "메리츠" 보호. "리츠" 앞에 "메"가 오면 매치 안 함.
+# 실제 KRX REIT 종목명은 모두 "...리츠"로 끝나고 "메리츠"만 false positive를 일으킴.
+# 예: 롯데리츠/신한알파리츠/한화리츠/이리츠코크렙 등은 매치 ✓, 메리츠금융지주는 패스 ✓
+_REIT_NAME = re.compile(r"(?<!메)리츠")
 # ETF/ETN은 종목명에 "ETF"/"ETN" 또는 운용사 prefix 가 흔하지만 명확하지 않아
 # pykrx의 etf/etn 리스트로 별도 컷.
 
