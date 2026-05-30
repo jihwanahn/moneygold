@@ -16,6 +16,7 @@ from datetime import datetime
 from pathlib import Path
 
 from ..config import load_config
+from ..data import store
 from ..data.kis_client import KISClient
 from ..data.sync import DataSync
 from ..strategies.value_long_term import scoring
@@ -26,12 +27,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="가속화 장기투자 (DGI) 스크리너")
     parser.add_argument("--screen", action="store_true",
                         help="전체/지정 종목에 대해 DGI 점수 산출")
+    parser.add_argument("--market", choices=["kr", "us"], default="kr",
+                        help="kr=KOSPI/KOSDAQ (pykrx+DART), us=S&P500 (yfinance+SEC). 기본 kr.")
     parser.add_argument("--asof", help="기준일 YYYYMMDD. 기본은 오늘.")
     parser.add_argument("--tickers", help="특정 종목만. 콤마 구분.")
     parser.add_argument("--limit", type=int, help="첫 N개 종목만 (디버그)")
     parser.add_argument("--top", type=int, default=30, help="콘솔 출력 상위 N개")
     parser.add_argument("--no-dart", action="store_true",
-                        help="DART(주주환원) 항목 skip. DART 키 없거나 빠른 디버그 시.")
+                        help="[kr] DART(주주환원) 항목 skip. DART 키 없거나 빠른 디버그 시.")
     parser.add_argument("--min-grade", choices=["A", "B", "C"], default="C",
                         help="이 등급 이상만 저장. 기본 C(전체)")
     args = parser.parse_args(argv)
@@ -50,7 +53,16 @@ def main(argv: list[str] | None = None) -> int:
 
     asof = args.asof or datetime.now().strftime("%Y%m%d")
     data_dir = Path(cfg.data_dir)
+    grade_order = {"A": 3, "B": 2, "C": 1}
+    min_g = grade_order[args.min_grade]
 
+    if args.market == "us":
+        return _screen_us(args, cfg, data_dir, asof, min_g, log)
+    return _screen_kr(args, cfg, data_dir, asof, min_g, log)
+
+
+def _screen_kr(args, cfg, data_dir, asof, min_g, log) -> int:
+    grade_order = {"A": 3, "B": 2, "C": 1}
     # 종목 선택
     if args.tickers:
         tickers = [t.strip() for t in args.tickers.split(",") if t.strip()]
@@ -65,7 +77,7 @@ def main(argv: list[str] | None = None) -> int:
         tickers = master["ticker"].tolist()
         name_map = dict(zip(master["ticker"], master.get("name", master["ticker"]), strict=False))
 
-    log.info("=== DGI screen: asof=%s, tickers=%d ===", asof, len(tickers))
+    log.info("=== DGI screen [KR]: asof=%s, tickers=%d ===", asof, len(tickers))
 
     dart: DartClient | None = None
     if not args.no_dart:
@@ -81,29 +93,65 @@ def main(argv: list[str] | None = None) -> int:
     if df.empty:
         log.warning("결과 없음")
         return 0
-
-    # 등급 필터
-    grade_order = {"A": 3, "B": 2, "C": 1}
-    min_g = grade_order[args.min_grade]
     df_filtered = df[df["grade"].map(grade_order) >= min_g].copy()
-
     path = scoring.save_scores(df_filtered, data_dir, asof)
-    log.info("저장: %s (%d rows, A=%d B=%d C=%d)",
-             path, len(df_filtered),
-             (df_filtered["grade"] == "A").sum(),
-             (df_filtered["grade"] == "B").sum(),
+    log.info("저장: %s (%d rows, A=%d B=%d C=%d)", path, len(df_filtered),
+             (df_filtered["grade"] == "A").sum(), (df_filtered["grade"] == "B").sum(),
              (df_filtered["grade"] == "C").sum())
-
-    # 콘솔 상위 N개
     show_cols = [
         "ticker", "name", "total", "grade",
         "dividend_total", "capital_total", "fundamental_total", "shareholder_total",
         "dividend_yield_pct", "consecutive_increase_years", "dps_cagr_5y_pct",
         "price_cagr_5y_pct", "roe_5y_avg_pct",
     ]
-    available_cols = [c for c in show_cols if c in df_filtered.columns]
-    head = df_filtered.head(args.top)[available_cols]
-    print(head.to_string(index=False))
+    available = [c for c in show_cols if c in df_filtered.columns]
+    print(df_filtered.head(args.top)[available].to_string(index=False))
+    return 0
+
+
+def _screen_us(args, cfg, data_dir, asof, min_g, log) -> int:
+    from ..strategies.value_long_term import scoring_us
+
+    grade_order = {"A": 3, "B": 2, "C": 1}
+    # 종목 선택: 명시 tickers > 동기화된 us_dividends 글롭 (= S&P500 sync 결과)
+    if args.tickers:
+        tickers = [t.strip() for t in args.tickers.split(",") if t.strip()]
+    else:
+        synced = sorted(p.stem for p in (data_dir / "us_dividends").glob("*.parquet"))
+        if not synced:
+            log.error("동기화된 US 배당 데이터 없음. 먼저: "
+                      "python -m moneygold.cli.sync --us-dividends --scope sp500")
+            return 1
+        tickers = synced
+    if args.limit:
+        tickers = tickers[: args.limit]
+
+    # name_map (master에서)
+    name_map: dict[str, str] = {}
+    master = store.read_parquet_safe(store.master_path(data_dir))
+    if master is not None and "name" in master.columns:
+        us = master[master["market"] == "US"]
+        name_map = dict(zip(us["ticker"], us["name"], strict=False))
+
+    log.info("=== DGI screen [US]: asof=%s, tickers=%d ===", asof, len(tickers))
+
+    df = scoring_us.screen_us(tickers, asof, data_dir, name_map=name_map)
+    if df.empty:
+        log.warning("결과 없음")
+        return 0
+    df_filtered = df[df["grade"].map(grade_order) >= min_g].copy()
+    path = scoring_us.save_us_scores(df_filtered, data_dir, asof)
+    log.info("저장: %s (%d rows, A=%d B=%d C=%d)", path, len(df_filtered),
+             (df_filtered["grade"] == "A").sum(), (df_filtered["grade"] == "B").sum(),
+             (df_filtered["grade"] == "C").sum())
+    show_cols = [
+        "ticker", "name", "total", "grade", "aristocrat_label",
+        "dividend_total", "capital_total", "fundamental_total", "aristocrat_total",
+        "dividend_yield_pct", "consecutive_increase_years", "dps_cagr_5y_pct",
+        "price_cagr_5y_pct", "roe_pct",
+    ]
+    available = [c for c in show_cols if c in df_filtered.columns]
+    print(df_filtered.head(args.top)[available].to_string(index=False))
     return 0
 
 

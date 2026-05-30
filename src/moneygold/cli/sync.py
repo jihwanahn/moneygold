@@ -53,6 +53,8 @@ def main(argv: list[str] | None = None) -> int:
                       help='"가속화 장기투자" 탭용 DART 재무지표 sync (ROE 등, 최근 5년)')
     mode.add_argument("--dart-business", action="store_true",
                       help='DART 사업보고서 주요사항 sync (증자/감자, 자기주식, 회사정보, raw 재무제표)')
+    mode.add_argument("--us-dividends", action="store_true",
+                      help='"US 가속화 장기투자" 탭용 배당 이력 + info(yield/payout/ROE) sync (yfinance)')
     mode.add_argument("--us", action="store_true",
                       help="미국 시스템 전체 sync: 마스터 + 일봉 + 지수 + 분기재무 + 컨센서스")
     mode.add_argument("--us-kis-crosscheck", action="store_true",
@@ -73,8 +75,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="--us 모드 mcap 컷오프 (USD). 기본은 config의 US_MCAP_MIN_USD.")
     parser.add_argument("--no-batch", action="store_true",
                         help="--us 모드에서 ticker별 fetch (느림). 기본은 yf.download 배치 (~5-10배 빠름).")
-    parser.add_argument("--scope", choices=["all", "k200kq150"], default="all",
-                        help="--dart-business 종목 범위. k200kq150 = KOSPI200+KOSDAQ150만.")
+    parser.add_argument("--scope", choices=["all", "k200kq150", "sp500"], default="all",
+                        help="종목 범위. k200kq150=KOSPI200+KOSDAQ150 (dart-business), "
+                             "sp500=S&P500 (us-dividends).")
+    parser.add_argument("--us-bars-period", default="5y",
+                        help="--us-dividends 시 일봉 backfill 기간 (yfinance period, 기본 5y). "
+                             "5년 주가 CAGR/200일선 비율 산출에 필요.")
     parser.add_argument(
         "--force-refresh-recent", type=int, default=None,
         help="최근 N거래일을 강제 다시 fetch + 덮어쓰기. "
@@ -88,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
     log = logging.getLogger("moneygold.cli.sync")
 
     # 모드 디폴트
-    if not (args.universe or args.backfill or args.daily or args.indices or args.financials or args.consensus or args.dividends or args.dart_indicators or args.dart_business or args.us or args.us_kis_crosscheck):
+    if not (args.universe or args.backfill or args.daily or args.indices or args.financials or args.consensus or args.dividends or args.dart_indicators or args.dart_business or args.us_dividends or args.us or args.us_kis_crosscheck):
         args.daily = True
 
     # force_refresh_recent 기본값:
@@ -110,6 +116,44 @@ def main(argv: list[str] | None = None) -> int:
         log.info("결과: KIS 전체=%d, US master=%d, tradable=%d (%.1f%%)",
                  stats["kis_total"], stats["us_master"], stats["tradable"],
                  100.0 * stats["tradable"] / max(stats["us_master"], 1))
+        return 0
+
+    # US 배당 이력 + info + 5년 일봉 backfill ("US 가속화 장기투자" 탭용)
+    if args.us_dividends:
+        from datetime import datetime as _dt
+
+        from ..data import us_dividends as ud
+
+        asof = args.asof or _dt.now().strftime("%Y%m%d")
+        # 종목: 명시 tickers > scope=sp500 (S&P500 구성) > master의 전체 US
+        if args.tickers:
+            tickers = _parse_tickers_arg(args.tickers) or []
+        elif args.scope == "sp500":
+            from ..universe_us import fetch_sp500_constituents
+            log.info("S&P500 구성 종목 fetch...")
+            sp = fetch_sp500_constituents()
+            tickers = sp["ticker"].tolist() if not sp.empty else []
+            log.info("→ %d 종목", len(tickers))
+        else:
+            master = sync.load_universe()
+            tickers = master[master["market"] == "US"]["ticker"].tolist()
+        if args.limit:
+            tickers = tickers[: args.limit]
+
+        # 1) 5년 일봉 backfill (5년 주가 CAGR / 200일선 비율에 필요)
+        log.info("== US bars backfill (%d 종목, period=%s) ==", len(tickers), args.us_bars_period)
+        bstats = sync.sync_bars_all_us(tickers, batch=not args.no_batch,
+                                        period=args.us_bars_period)
+        log.info("Bars: total=%d updated=%d no_change=%d failed=%d",
+                 bstats["total"], bstats["updated"], bstats["no_change"], len(bstats["failed"]))
+
+        # 2) 배당 이력 + info (yfinance)
+        log.info("== sync_us_dividends (asof=%s, %d 종목) ==", asof, len(tickers))
+        stats = ud.sync_us_dividends(Path(cfg.data_dir), tickers, asof=asof)
+        log.info("US dividends: total=%d updated=%d no_data=%d failed=%d",
+                 stats["total"], stats["updated"], stats["no_data"], len(stats["failed"]))
+        for tk, err in stats["failed"][:10]:
+            log.warning("  %s: %s", tk, err)
         return 0
 
     # 미국 시스템 전체 sync (yfinance 단독)

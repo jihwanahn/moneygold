@@ -312,12 +312,24 @@ with st.sidebar:
         st.caption(f"📅 최신 거래일: **{asof_str}**")
 
     st.divider()
-    markets = st.multiselect(
-        "시장",
-        sorted(master["market"].unique()),
-        default=sorted(master["market"].unique()),
-        help=g.TOOLTIP_MARKET,
+    # 🌐 시장 스코프 — 모멘텀 3탭(BUY 후보/오늘 상승/Momentum Breakout)을 단일 시장으로 한정.
+    # Streamlit 사이드바는 탭보다 *먼저* 렌더되므로, 이 라디오 값으로 시총 단위·모멘텀 임계값을
+    # 시장에 맞춰 전환할 수 있다 (탭 본문에선 사이드바를 못 바꿈). 백테스트·💎DGI 탭은 무관.
+    _scope_markets_present = set(master["market"].unique())
+    _scope_options = ["🇰🇷 한국 (KOSPI+KOSDAQ)"]
+    if "US" in _scope_markets_present:
+        _scope_options.append("🇺🇸 미국 (US)")
+    market_scope = st.radio(
+        "🌐 시장",
+        _scope_options,
+        horizontal=True,
+        help="BUY 후보 / 오늘 상승 / Momentum Breakout 탭이 선택한 시장만 표시. "
+             "시총 단위·정렬·모멘텀 임계값(거래대금 컷 등)이 시장에 맞춰 전환됨. "
+             "한국과 미국은 RS·시총 단위·거래대금 분포가 달라 한 표에 섞으면 비교가 왜곡됨.",
     )
+    is_us_scope = market_scope.startswith("🇺🇸")
+    scope_markets = ["US"] if is_us_scope else ["KOSPI", "KOSDAQ"]
+    markets = scope_markets   # tab_main 워치리스트 필터가 사용
 
     if "tradable_kis" in master.columns:
         only_tradable_kis = st.checkbox(
@@ -344,18 +356,31 @@ with st.sidebar:
         sectors = None
 
     if "mcap" in master.columns:
-        # 단위: 조원
-        max_mcap_trillion = max(1, int((master["mcap"].max() / 1e12) + 1))
-        mcap_range_trillion = st.slider(
-            "시가총액 범위 (조원)",
-            min_value=0.0, max_value=float(max_mcap_trillion),
-            value=(0.0, float(max_mcap_trillion)), step=0.05,
-            help=g.TOOLTIP_MCAP,
-        )
-        mcap_min_krw = mcap_range_trillion[0] * 1e12
-        mcap_max_krw = mcap_range_trillion[1] * 1e12
+        # 스코프 시장의 native 통화 단위로 표시 (KR=조원 / US=$B). 두 시장 시총 단위가
+        # 다르므로(₩ vs $) 한 슬라이더에 못 섞음 — 스코프에 맞춰 단위·범위 전환.
+        _scope_mcaps = master.loc[master["market"].isin(scope_markets), "mcap"].dropna()
+        if is_us_scope:
+            _max_b = max(1, int((_scope_mcaps.max() / 1e9) + 1)) if not _scope_mcaps.empty else 1000
+            _range_b = st.slider(
+                "시가총액 범위 ($B · 미국)",
+                min_value=0.0, max_value=float(_max_b),
+                value=(0.0, float(_max_b)), step=0.5,
+                help=g.TOOLTIP_MCAP + "  · 미국: 10억 달러($B) 단위.",
+            )
+            mcap_min_sel = _range_b[0] * 1e9
+            mcap_max_sel = _range_b[1] * 1e9
+        else:
+            _max_t = max(1, int((_scope_mcaps.max() / 1e12) + 1)) if not _scope_mcaps.empty else 1
+            _range_t = st.slider(
+                "시가총액 범위 (조원 · 한국)",
+                min_value=0.0, max_value=float(_max_t),
+                value=(0.0, float(_max_t)), step=0.05,
+                help=g.TOOLTIP_MCAP,
+            )
+            mcap_min_sel = _range_t[0] * 1e12
+            mcap_max_sel = _range_t[1] * 1e12
     else:
-        mcap_min_krw = mcap_max_krw = None
+        mcap_min_sel = mcap_max_sel = None
 
     st.divider()
     st.subheader("🧭 게이트 (Stage / Trend Template)")
@@ -646,8 +671,9 @@ with st.expander("❓ 이 대시보드 사용법 (처음 사용자 필독)", exp
         st.markdown(f"- **Stage {code} {label}** ({color}) — {desc}")
 
 
-tab_main, tab_gainers, tab_momentum, tab_backtest, tab_dgi = st.tabs(
-    ["📋 BUY 후보", "📈 오늘 상승", "⚡ Momentum Breakout", "🔬 백테스트", "💎 가속화 장기투자"]
+tab_main, tab_gainers, tab_momentum, tab_backtest, tab_dgi, tab_dgi_us = st.tabs(
+    ["📋 BUY 후보", "📈 오늘 상승", "⚡ Momentum Breakout", "🔬 백테스트",
+     "💎 가속화 장기투자", "🇺🇸 US 가속화 장기투자"]
 )
 
 @st.cache_data(show_spinner="오늘 상승 종목 분석 중…")
@@ -684,12 +710,9 @@ with tab_gainers:
             help=g.GAINERS_TOOLTIP_MIN_PCT,
         )
     with gctrl2:
-        market_options = sorted(master["market"].unique())
-        gainers_markets = st.multiselect(
-            "시장 (오늘 상승 탭 한정)", market_options, default=market_options,
-            key="gainers_markets",
-            help="이 탭에만 적용. 사이드바 시장 필터와 무관.",
-        )
+        st.markdown("**🌐 시장 스코프**")
+        st.caption(f"**{market_scope}** — 사이드바 '🌐 시장'에서 전환. "
+                   "이 탭은 스코프 시장만 표시 (alpha_score는 시장별 자동 가중).")
     with gctrl3:
         only_buy_intersection = st.checkbox(
             "BUY 후보 교집합만", value=False,
@@ -755,8 +778,7 @@ with tab_gainers:
         )
 
     df_g_all = _gainers_with_stage_cached(data_dir_str, asof_str, gainers_pct / 100.0)
-    if gainers_markets:
-        df_g_all = df_g_all[df_g_all["market"].isin(gainers_markets)]
+    df_g_all = df_g_all[df_g_all["market"].isin(scope_markets)]
     # KIS 주문 가능 토글 (사이드바)
     if only_tradable_kis and "tradable_kis" in master.columns:
         _kis_set = set(master[master["tradable_kis"]]["ticker"])
@@ -941,6 +963,7 @@ with tab_gainers:
 def _momentum_candidates_cached(
     _data_dir_str: str,
     asof: str,
+    market_scope: str,
     new_high_lookback: int,
     fresh_window: int,
     volume_spike_ratio: float,
@@ -952,9 +975,13 @@ def _momentum_candidates_cached(
 ) -> list[dict]:
     """find_entry_candidates 결과를 dict 리스트로 직렬화해 캐시.
 
+    market_scope : "🇰🇷..." / "🇺🇸..." 사이드바 스코프 라벨. US 스코프면 거래대금/시총
+        rank 컷을 US 그룹 필드(top_n_value_us/top_n_marketcap_us)에 매핑하고 US 종목만
+        스캔. KR 스코프면 scalar 필드 + KR 종목만. (US는 거래대금 메가캡 쏠림 때문에
+        동일 rank 컷이면 초대형주만 남아 ⚡ 가 사실상 안 뜸 — Stage1 분석 참조.)
     search_window_days >= 1: asof 이하 마지막 N 거래일을 *각각* 검사해
-    종목별로 가장 최근 시그널 발생일(`signal_date`)을 보관. 같은 종목이 여러 날
-    잡히면 *가장 최근* 발생만 남김 (관측 의도: "최근 N일 안에 한 번이라도 시그널").
+        종목별로 가장 최근 시그널 발생일(`signal_date`)을 보관. 같은 종목이 여러 날
+        잡히면 *가장 최근* 발생만 남김 (관측 의도: "최근 N일 안에 한 번이라도 시그널").
     """
     from moneygold.data import store as _st
     from moneygold.strategies.momentum_breakout import (
@@ -966,8 +993,10 @@ def _momentum_candidates_cached(
     master_all = _load_master(_data_dir_str)
     if master_all.empty:
         return []
-    # KR + US 통합 — find_entry_candidates 가 시장별 그룹 분리 처리.
-    master_all = master_all[master_all["market"].isin(("KOSPI", "KOSDAQ", "US"))].copy()
+    # 스코프 시장만 — find_entry_candidates 의 markets 인자와 일치시켜 불필요한 bars 로드 회피.
+    is_us = market_scope.startswith("🇺🇸")
+    mkts = ("US",) if is_us else ("KOSPI", "KOSDAQ")
+    master_all = master_all[master_all["market"].isin(mkts)].copy()
     if master_all.empty:
         return []
 
@@ -977,15 +1006,21 @@ def _momentum_candidates_cached(
         if b is not None and not b.empty:
             bars_by_ticker[tk] = b
 
-    cfg_m = MomentumConfig(
-        new_high_lookback=new_high_lookback,
-        fresh_window=fresh_window,
-        volume_spike_ratio=volume_spike_ratio,
-        top_n_value=top_n_value,
-        top_n_marketcap=top_n_marketcap,
-        min_listed_days=min_listed_days,
-        stop_loss_pct=stop_loss_pct,
-    )
+    # 슬라이더 값(top_n)을 활성 시장의 config 필드에 매핑 — US 스코프면 *_us 필드로.
+    if is_us:
+        cfg_m = MomentumConfig(
+            new_high_lookback=new_high_lookback, fresh_window=fresh_window,
+            volume_spike_ratio=volume_spike_ratio,
+            top_n_value_us=top_n_value, top_n_marketcap_us=top_n_marketcap,
+            min_listed_days=min_listed_days, stop_loss_pct=stop_loss_pct,
+        )
+    else:
+        cfg_m = MomentumConfig(
+            new_high_lookback=new_high_lookback, fresh_window=fresh_window,
+            volume_spike_ratio=volume_spike_ratio,
+            top_n_value=top_n_value, top_n_marketcap=top_n_marketcap,
+            min_listed_days=min_listed_days, stop_loss_pct=stop_loss_pct,
+        )
 
     # 검사 대상 날짜 결정 — asof 이하 마지막 N 거래일
     trading_days = _available_trading_days(_data_dir_str)
@@ -998,7 +1033,7 @@ def _momentum_candidates_cached(
     asof_dt = pd.to_datetime(asof)
     seen: dict[str, dict] = {}
     for d in days_to_check:
-        entries = find_entry_candidates(d, bars_by_ticker, master_all, cfg_m)
+        entries = find_entry_candidates(d, bars_by_ticker, master_all, cfg_m, markets=mkts)
         for e in entries:
             if e.ticker in seen:
                 continue   # 이미 더 최근 발생 등록됨
@@ -1021,6 +1056,7 @@ def _momentum_candidates_cached(
 def _last_momentum_signal_date(
     _data_dir_str: str,
     asof: str,
+    market_scope: str,
     new_high_lookback: int,
     fresh_window: int,
     volume_spike_ratio: float,
@@ -1031,7 +1067,7 @@ def _last_momentum_signal_date(
     max_search_days: int = 60,
 ) -> str | None:
     """asof 이하 최대 max_search_days 거래일 안에서 *한 종목이라도* 시그널이 난
-    가장 최근 거래일을 찾는다. 없으면 None.
+    가장 최근 거래일을 찾는다 (스코프 시장 한정). 없으면 None.
 
     "후보 0개" 상황에서 빠른 점프 버튼용. 검사는 최신 → 옛날 순으로 진행하다가
     첫 발견 시 즉시 반환 — 60일 전체 스캔이 아니다.
@@ -1045,7 +1081,9 @@ def _last_momentum_signal_date(
     master_all = _load_master(_data_dir_str)
     if master_all.empty:
         return None
-    master_all = master_all[master_all["market"].isin(("KOSPI", "KOSDAQ", "US"))].copy()
+    is_us = market_scope.startswith("🇺🇸")
+    mkts = ("US",) if is_us else ("KOSPI", "KOSDAQ")
+    master_all = master_all[master_all["market"].isin(mkts)].copy()
     if master_all.empty:
         return None
     bars_by_ticker: dict[str, pd.DataFrame] = {}
@@ -1053,16 +1091,24 @@ def _last_momentum_signal_date(
         b = _st.read_parquet_safe(_st.bars_path(data_dir, tk))
         if b is not None and not b.empty:
             bars_by_ticker[tk] = b
-    cfg_m = MomentumConfig(
-        new_high_lookback=new_high_lookback, fresh_window=fresh_window,
-        volume_spike_ratio=volume_spike_ratio, top_n_value=top_n_value,
-        top_n_marketcap=top_n_marketcap, min_listed_days=min_listed_days,
-        stop_loss_pct=stop_loss_pct,
-    )
+    if is_us:
+        cfg_m = MomentumConfig(
+            new_high_lookback=new_high_lookback, fresh_window=fresh_window,
+            volume_spike_ratio=volume_spike_ratio,
+            top_n_value_us=top_n_value, top_n_marketcap_us=top_n_marketcap,
+            min_listed_days=min_listed_days, stop_loss_pct=stop_loss_pct,
+        )
+    else:
+        cfg_m = MomentumConfig(
+            new_high_lookback=new_high_lookback, fresh_window=fresh_window,
+            volume_spike_ratio=volume_spike_ratio,
+            top_n_value=top_n_value, top_n_marketcap=top_n_marketcap,
+            min_listed_days=min_listed_days, stop_loss_pct=stop_loss_pct,
+        )
     trading_days = _available_trading_days(_data_dir_str)
     asof_below = [d for d in trading_days if d <= asof]
     for d in reversed(asof_below[-max_search_days:]):
-        entries = find_entry_candidates(d, bars_by_ticker, master_all, cfg_m)
+        entries = find_entry_candidates(d, bars_by_ticker, master_all, cfg_m, markets=mkts)
         if entries:
             return d
     return None
@@ -1071,8 +1117,8 @@ def _last_momentum_signal_date(
 with tab_momentum:
     st.subheader("⚡ Momentum Breakout 후보")
     st.caption(
-        f"asof **{asof_str}** · N일 신고가 돌파 + 거래대금 스파이크 + 거래대금/시총 상위 N. "
-        "Stage/Template 게이트와 *별개* — KOSPI+KOSDAQ 통합 순수 모멘텀 신호."
+        f"asof **{asof_str}** · {market_scope} · N일 신고가 돌파 + 거래대금 스파이크 + 거래대금/시총 상위 N. "
+        "Stage/Template 게이트와 *별개* — 순수 모멘텀 신호. 사이드바 '🌐 시장'으로 KR/US 전환."
     )
 
     with st.expander("❓ 이 탭은 뭔가요? (처음 보는 경우)", expanded=False):
@@ -1081,8 +1127,9 @@ with tab_momentum:
             "1. **신고가 돌파** — 종가 > 직전 N일 (기본 60) 최고 종가\n"
             "2. **Fresh** — 직전 M일 (기본 20) 안에 같은 의미의 돌파가 없었음 (반복 돌파 제외)\n"
             "3. **거래대금 스파이크** — 당일 거래대금 ≥ 20일 평균 × ratio (기본 1.5)\n"
-            "4. **유동성** — 당일 KOSPI+KOSDAQ 통합 거래대금 상위 N위 (기본 100)\n"
-            "5. **시가총액** — 상위 N위 (기본 100, off 가능)\n"
+            "4. **유동성** — 당일 *스코프 시장 내* 거래대금 상위 N위 "
+            "(KR 기본 100 / US 기본 1000 — US는 거래대금 메가캡 쏠림 때문에 완화)\n"
+            "5. **시가총액** — 상위 N위 (KR 기본 100 / US 기본 off)\n"
             "6. **상장 기간** — N일 이상 (기본 60)\n"
             "7. 우선주/스팩/리츠/ETF·ETN 제외\n\n"
             "**Score** = `volume_ratio × (1 + new_high_amplitude)` — 거래대금 폭증과 "
@@ -1109,16 +1156,24 @@ with tab_momentum:
             help="오늘 거래대금 / 직전 20일 평균. 이상이어야 통과.",
         )
     with mctrl4:
-        momo_top_value = st.slider(
-            "거래대금 상위 N위", min_value=20, max_value=300, value=100, step=10,
-            help="당일 KOSPI+KOSDAQ 통합 거래대금 랭킹 상위 N에 들어야 통과.",
-        )
+        if is_us_scope:
+            momo_top_value = st.slider(
+                "거래대금 상위 N위 (US)", min_value=100, max_value=2000, value=1000, step=50,
+                help="당일 US 거래대금 랭킹 상위 N. US는 거래대금이 메가캡에 극단적으로 "
+                     "쏠려, 100이면 초대형주만 남아 ⚡ 가 사실상 안 뜸 → 기본 1000(상위 ~31%).",
+            )
+        else:
+            momo_top_value = st.slider(
+                "거래대금 상위 N위", min_value=20, max_value=300, value=100, step=10,
+                help="당일 KOSPI+KOSDAQ 통합 거래대금 랭킹 상위 N에 들어야 통과.",
+            )
 
     mctrl5, mctrl6, mctrl7, mctrl8 = st.columns(4)
     with mctrl5:
         use_mcap_filter = st.checkbox(
-            "시총 상위 100 필터 적용", value=True,
-            help="off면 시총 무관 (소형주도 후보 가능).",
+            "시총 상위 100 필터 적용", value=not is_us_scope,
+            help="off면 시총 무관 (소형주도 후보 가능). US는 시총 컷이 메가캡 쏠림을 "
+                 "악화시켜 기본 off 권장.",
         )
     with mctrl6:
         momo_min_listed = st.slider(
@@ -1145,7 +1200,7 @@ with tab_momentum:
 
     momo_top_mcap_arg = 100 if use_mcap_filter else None
     momo_entries = _momentum_candidates_cached(
-        data_dir_str, asof_str,
+        data_dir_str, asof_str, market_scope,
         momo_lookback, momo_fresh, momo_vol_ratio,
         momo_top_value, momo_top_mcap_arg,
         momo_min_listed, momo_stop_pct / 100.0,
@@ -1159,7 +1214,7 @@ with tab_momentum:
         # 0개인 경우 → 가장 최근 시그널 발생일 안내 + 점프 버튼
         # alpha 의미 있는 범위 (~45거래일) 내에서만 검색.
         last_signal_d = _last_momentum_signal_date(
-            data_dir_str, asof_str,
+            data_dir_str, asof_str, market_scope,
             momo_lookback, momo_fresh, momo_vol_ratio,
             momo_top_value, momo_top_mcap_arg,
             momo_min_listed, momo_stop_pct / 100.0,
@@ -1250,6 +1305,13 @@ with tab_momentum:
 
 
 with tab_main:
+    # 🌐 시장 스코프로 한정 — 사이드바 '🌐 시장' 선택값. watchlist/new_buys 둘 다 단일 시장.
+    # (RS rank·시총 단위가 시장별이라 한 표에 섞으면 비교 왜곡 + US가 KR을 묻어버림)
+    if not watchlist_df.empty:
+        watchlist_df = watchlist_df[watchlist_df["market"].isin(scope_markets)].reset_index(drop=True)
+    if not new_buys_df.empty:
+        new_buys_df = new_buys_df[new_buys_df["market"].isin(scope_markets)].reset_index(drop=True)
+
     # ---------- ⚡ Momentum overlay ----------
     # 사용자 명제 검증 (6년 백테스트: alpha +303%p, 모든 regime expectancy 양수) 결과,
     # BUY 후보 풀에 momentum breakout 시그널 정보를 함께 표시. 진입/손절/익절 룰:
@@ -1281,13 +1343,15 @@ with tab_main:
             help="체크 시 momentum breakout 시그널 *발생한* watchlist 종목만 표시 (강한 필터).",
         )
 
-    # momentum 정보 fetch (cached) — 기본 파라미터 사용 (사이드바 매수 명제와 정합)
+    # momentum 정보 fetch (cached) — 스코프별 기본 컷. US는 거래대금 메가캡 쏠림 때문에
+    # 완화값(1000 / mcap off) — 안 그러면 US 후보 풀 ⚡ 오버레이가 사실상 0건 (Stage1 분석).
     momo_signal_map: dict = {}
     if show_momo_overlay:
+        _ov_top_v, _ov_top_mc = (1000, None) if is_us_scope else (100, 100)
         momo_entries_main = _momentum_candidates_cached(
-            data_dir_str, asof_str,
+            data_dir_str, asof_str, market_scope,
             new_high_lookback=60, fresh_window=20, volume_spike_ratio=1.5,
-            top_n_value=100, top_n_marketcap=100, min_listed_days=60,
+            top_n_value=_ov_top_v, top_n_marketcap=_ov_top_mc, min_listed_days=60,
             stop_loss_pct=0.10, search_window_days=momo_main_window,
         )
         momo_signal_map = {e["ticker"]: e for e in momo_entries_main}
@@ -1367,11 +1431,10 @@ with tab_main:
             flt = flt[flt["box_state"].isin(box_states)]
         if sectors is not None and "sector" in flt.columns:
             flt = flt[flt["sector"].isin(sectors)]
-        # mcap slider는 KRW(조원) 단위. US 종목은 USD라 단위 mismatch — KR/KOSDAQ만 적용.
-        if mcap_min_krw is not None and "mcap" in flt.columns:
-            kr_mask = flt["market"].isin(["KOSPI", "KOSDAQ"])
-            kr_keep = (flt["mcap"] >= mcap_min_krw) & (flt["mcap"] <= mcap_max_krw)
-            flt = flt[(~kr_mask) | kr_keep]
+        # mcap slider 단위는 스코프 시장 native (KR=조원 / US=$B). flt 는 이미 단일 시장이라
+        # 단위 일치 — 그대로 범위 필터.
+        if mcap_min_sel is not None and "mcap" in flt.columns:
+            flt = flt[(flt["mcap"] >= mcap_min_sel) & (flt["mcap"] <= mcap_max_sel)]
         # 펀더멘털 필터 (NaN은 통과 — 데이터 없는 종목은 거르지 않음)
         if "revenue_yoy" in flt.columns and min_revenue_yoy > -50:
             flt = flt[flt["revenue_yoy"].fillna(min_revenue_yoy) >= min_revenue_yoy]
@@ -1486,7 +1549,11 @@ with tab_main:
             if "sector_rs_rank" in disp.columns:
                 disp["sector_rs_rank"] = disp["sector_rs_rank"].round(1)
             if "mcap" in disp.columns:
-                disp["mcap_trillion"] = (disp["mcap"] / 1e12).round(3)
+                # KR=조원(1e12) / US=$B(1e9). 컬럼 key 는 유지하고 단위·헤더만 스코프별.
+                if is_us_scope:
+                    disp["mcap_trillion"] = (disp["mcap"] / 1e9).round(2)
+                else:
+                    disp["mcap_trillion"] = (disp["mcap"] / 1e12).round(3)
                 disp = disp.drop(columns=["mcap"])
             # momentum 컬럼 정리 — 미발생 행은 NaN/None 표시
             if "momo_score" in disp.columns:
@@ -1524,7 +1591,9 @@ with tab_main:
                 "suggested_stop": st.column_config.NumberColumn("stop hint", format="localized", help=g.COL_SUGGESTED_STOP),
             }
             if "mcap_trillion" in disp.columns:
-                col_cfg["mcap_trillion"] = st.column_config.NumberColumn("시총(조)", format="%.2f", help=g.COL_MCAP_TRILLION)
+                col_cfg["mcap_trillion"] = st.column_config.NumberColumn(
+                    "시총($B)" if is_us_scope else "시총(조)", format="%.2f",
+                    help=("시가총액 (단위: 10억 달러 $B)." if is_us_scope else g.COL_MCAP_TRILLION))
             # ⚡ Momentum overlay 컬럼
             if "momo_signal_date" in disp.columns:
                 col_cfg["momo_signal_date"] = st.column_config.TextColumn(
@@ -1789,7 +1858,7 @@ with tab_main:
 
     with b2:
         st.subheader("RS rank 분포 (워치리스트)")
-        st.caption("같은 시장(KOSPI 또는 KOSDAQ) 내 종목들의 상대 강도 백분위 0~100.")
+        st.caption(f"{market_scope} 내 종목들의 상대 강도 백분위 0~100 (시장별 횡단면).")
         if not watchlist_df.empty:
             st.plotly_chart(
                 build_rs_distribution(watchlist_df["rs_rank"]),
@@ -2184,12 +2253,19 @@ with tab_dgi:
         avail = [c for c in display_cols if c in filtered.columns]
         st.dataframe(filtered[avail].head(100), use_container_width=True, hide_index=True,
                      column_config={
-                         "total": st.column_config.NumberColumn("총점", format="%d"),
-                         "dividend_yield_pct": st.column_config.NumberColumn("yield(%)", format="%.2f"),
-                         "consecutive_increase_years": st.column_config.NumberColumn("연속(년)", format="%d"),
-                         "dps_cagr_5y_pct": st.column_config.NumberColumn("DPS CAGR(%)", format="%.1f"),
-                         "price_cagr_5y_pct": st.column_config.NumberColumn("주가 CAGR(%)", format="%.1f"),
-                         "roe_5y_avg_pct": st.column_config.NumberColumn("ROE 5yr(%)", format="%.1f"),
+                         "ticker": st.column_config.TextColumn("종목", help=g.COL_TICKER),
+                         "name": st.column_config.TextColumn("이름", help=g.COL_NAME),
+                         "total": st.column_config.NumberColumn("총점", format="%d", help=g.DGI_TOTAL),
+                         "grade": st.column_config.TextColumn("등급", help=g.DGI_GRADE),
+                         "dividend_yield_pct": st.column_config.NumberColumn("yield(%)", format="%.2f", help=g.DGI_DIVIDEND_YIELD),
+                         "consecutive_increase_years": st.column_config.NumberColumn("연속(년)", format="%d", help=g.DGI_CONSEC),
+                         "dps_cagr_5y_pct": st.column_config.NumberColumn("DPS CAGR(%)", format="%.1f", help=g.DGI_DPS_CAGR),
+                         "price_cagr_5y_pct": st.column_config.NumberColumn("주가 CAGR(%)", format="%.1f", help=g.DGI_PRICE_CAGR),
+                         "roe_5y_avg_pct": st.column_config.NumberColumn("ROE 5yr(%)", format="%.1f", help=g.DGI_ROE),
+                         "dividend_total": st.column_config.NumberColumn("배당", format="%d", help=g.DGI_DIVIDEND_TOTAL),
+                         "capital_total": st.column_config.NumberColumn("자본", format="%d", help=g.DGI_CAPITAL_TOTAL),
+                         "fundamental_total": st.column_config.NumberColumn("펀더", format="%d", help=g.DGI_FUNDAMENTAL_TOTAL),
+                         "shareholder_total": st.column_config.NumberColumn("환원", format="%d", help=g.DGI_SHAREHOLDER_TOTAL),
                      })
 
         st.divider()
@@ -2199,7 +2275,9 @@ with tab_dgi:
         st.caption(
             "선택한 종목들에 대해 **비관 / baseline / 낙관** 3 시나리오로 N년 자산 곡선 추정. "
             "초기금 + 월 추가납입 + 배당 100% 재투자 가정. "
-            "변동성 polynomial 없는 단순 CAGR 외삽이라 실제 수익률과 다름 — *순위/방향* 참고용."
+            "단순 CAGR 외삽이라 실제 수익률과 다름 — *순위/방향* 참고용. "
+            "현실성 가드: 투영 CAGR은 ±35%/yr로 clip(5년 CAGR의 장기 외삽 발산 방지), "
+            "배당수익률은 12% 상한(배당이 주가 초과하는 불가능 상태 방지)."
         )
 
         drip_left, drip_right = st.columns([0.55, 0.45])
@@ -2531,3 +2609,202 @@ with tab_dgi:
                             st.write("핵심 계정 데이터 없음 (계정명 매핑 확인 필요)")
                     else:
                         st.write("재무제표 raw 없음")
+
+
+# ============================================================
+# 🇺🇸 US 가속화 장기투자 (DGI) 탭
+# ============================================================
+
+@st.cache_data(show_spinner="US DGI 점수 계산 중…")
+def _dgi_us_screen_cached(_data_dir_str: str, asof: str) -> pd.DataFrame:
+    """동기화된 US 종목(store/us_dividends 글롭)에 대해 US DGI 점수 산출."""
+    from moneygold.strategies.value_long_term import scoring_us
+
+    data_dir = Path(_data_dir_str)
+    synced = sorted(p.stem for p in (data_dir / "us_dividends").glob("*.parquet"))
+    if not synced:
+        return pd.DataFrame()
+    name_map: dict[str, str] = {}
+    master = store.read_parquet_safe(store.master_path(data_dir))
+    if master is not None and "name" in master.columns:
+        us = master[master["market"] == "US"]
+        name_map = dict(zip(us["ticker"], us["name"], strict=False))
+    return scoring_us.screen_us(synced, asof, data_dir, name_map=name_map)
+
+
+with tab_dgi_us:
+    st.subheader("🇺🇸 US 가속화 장기투자")
+    st.caption(
+        f"asof **{asof_str}** — S&P500 대상 DGI(Dividend Growth Investing). "
+        "데이터: yfinance(배당/yield/payout/ROE) + SEC EDGAR(EPS). "
+        "KR 탭과 *독립*이며 US 시장에 맞춰 점수표를 튜닝 (연속 인상·배당귀족 강조)."
+    )
+
+    with st.expander("ℹ️ 점수표 (100점, US 튜닝)", expanded=False):
+        st.markdown(
+            "| 카테고리 | 항목 | 배점 |\n"
+            "|---|---|---|\n"
+            "| **배당 (45)** | 현재 yield (>5/3/2/1%) | 8 |\n"
+            "|  | 연속 인상 연수 (≥15/10/5/3) | 15 |\n"
+            "|  | 5년 DPS CAGR (≥10/7/5/3%) | 12 |\n"
+            "|  | 배당성향 안정 (30~70%) | 10 |\n"
+            "| **자본이득 (30)** | 5년 주가 CAGR / 200d / 총수익 | 15/10/5 |\n"
+            "| **펀더멘털 (15)** | ROE(yfinance) / EPS 변동계수(SEC) | 8/7 |\n"
+            "| **배당귀족 지위 (10)** | King 50y→10 / Aristocrat 25y→8 / Champion 15y→5 / Contender 10y→3 |\n\n"
+            "**등급**: A ≥ 80 · B ≥ 70 · C 미달.\n\n"
+            "KR 대비: yield 비중↓(고yield는 US에선 위험신호 가능), 연속인상·배당귀족 비중↑ "
+            "(배당킹/귀족 문화), 빈도 제외(US는 분기배당 보편), 주주환원→배당귀족 지위 대체.\n\n"
+            "사전 동기화: `python -m moneygold.cli.sync --us-dividends --scope sp500 --us-bars-period 5y`"
+        )
+
+    cfg = load_config()
+    data_dir_str = str(cfg.data_dir)
+    us_scores_dir = Path(data_dir_str) / "us_value_scores"
+    cached_path = us_scores_dir / f"{asof_str}.parquet"
+    fallback_path: Path | None = None
+    if not cached_path.exists() and us_scores_dir.exists():
+        cands = sorted(us_scores_dir.glob("*.parquet"))
+        if cands:
+            fallback_path = cands[-1]
+
+    uc1, uc2, uc3 = st.columns([0.3, 0.3, 0.4])
+    with uc1:
+        us_min_grade = st.selectbox("최소 등급", ["A", "B", "C"], index=2, key="us_dgi_min_grade")
+    with uc2:
+        us_min_consec = st.slider("최소 연속 인상 (년)", 0, 60, 0, 1, key="us_dgi_min_consec")
+    with uc3:
+        if st.button("🔄 US DGI 점수 강제 재계산 (~수분, S&P500)", key="us_dgi_refresh"):
+            _dgi_us_screen_cached.clear()
+            with st.spinner(f"US DGI 계산 중 (asof={asof_str})..."):
+                st.session_state["_us_dgi_force"] = True
+
+    if st.session_state.get("_us_dgi_force"):
+        us_df = _dgi_us_screen_cached(data_dir_str, asof_str)
+        st.session_state["_us_dgi_force"] = False
+    elif cached_path.exists():
+        us_df = store.read_parquet_safe(cached_path)
+        st.caption(f"💾 캐시: `us_value_scores/{asof_str}.parquet`. "
+                   f"갱신: CLI `python -m moneygold.cli.dgi --market us --screen --asof {asof_str}`")
+    elif fallback_path is not None:
+        us_df = store.read_parquet_safe(fallback_path)
+        st.warning(f"⚠️ asof={asof_str} 캐시 없어 가장 최근 결과(asof={fallback_path.stem}) 표시. "
+                   f"갱신: CLI `python -m moneygold.cli.dgi --market us --screen --asof {asof_str}` "
+                   "또는 위 강제 재계산 버튼.")
+    else:
+        us_df = None
+
+    if us_df is None or us_df.empty:
+        st.warning(
+            "US DGI 데이터 없음. 먼저 동기화 + 스크리닝:\n\n"
+            "```bash\npython -m moneygold.cli.sync --us-dividends --scope sp500 --us-bars-period 5y\n"
+            "python -m moneygold.cli.dgi --market us --screen --asof " + asof_str + "\n```"
+        )
+    else:
+        grade_order = {"A": 3, "B": 2, "C": 1}
+        filt = us_df[us_df["grade"].map(grade_order) >= grade_order[us_min_grade]].copy()
+        if "consecutive_increase_years" in filt.columns:
+            filt = filt[filt["consecutive_increase_years"].fillna(0) >= us_min_consec]
+
+        st.markdown(
+            f"**{len(filt)}개 종목** (A={int((filt['grade']=='A').sum())} · "
+            f"B={int((filt['grade']=='B').sum())} · C={int((filt['grade']=='C').sum())})"
+        )
+        disp_cols = [
+            "ticker", "name", "total", "grade", "aristocrat_label",
+            "dividend_yield_pct", "consecutive_increase_years", "dps_cagr_5y_pct",
+            "price_cagr_5y_pct", "roe_pct",
+            "dividend_total", "capital_total", "fundamental_total", "aristocrat_total",
+        ]
+        avail = [c for c in disp_cols if c in filt.columns]
+        st.dataframe(filt[avail].head(100), use_container_width=True, hide_index=True,
+                     column_config={
+                         "ticker": st.column_config.TextColumn("종목", help=g.COL_TICKER),
+                         "name": st.column_config.TextColumn("이름", help=g.COL_NAME),
+                         "total": st.column_config.NumberColumn("총점", format="%d", help=g.DGI_TOTAL),
+                         "grade": st.column_config.TextColumn("등급", help=g.DGI_GRADE),
+                         "aristocrat_label": st.column_config.TextColumn("배당귀족", help=g.DGI_ARISTOCRAT),
+                         "dividend_yield_pct": st.column_config.NumberColumn("yield(%)", format="%.2f", help=g.DGI_DIVIDEND_YIELD),
+                         "consecutive_increase_years": st.column_config.NumberColumn("연속(년)", format="%d", help=g.DGI_CONSEC),
+                         "dps_cagr_5y_pct": st.column_config.NumberColumn("DPS CAGR(%)", format="%.1f", help=g.DGI_DPS_CAGR),
+                         "price_cagr_5y_pct": st.column_config.NumberColumn("주가 CAGR(%)", format="%.1f", help=g.DGI_PRICE_CAGR),
+                         "roe_pct": st.column_config.NumberColumn("ROE(%)", format="%.1f", help=g.DGI_ROE),
+                         "dividend_total": st.column_config.NumberColumn("배당", format="%d", help=g.DGI_DIVIDEND_TOTAL),
+                         "capital_total": st.column_config.NumberColumn("자본", format="%d", help=g.DGI_CAPITAL_TOTAL),
+                         "fundamental_total": st.column_config.NumberColumn("펀더", format="%d", help=g.DGI_FUNDAMENTAL_TOTAL),
+                         "aristocrat_total": st.column_config.NumberColumn("귀족", format="%d", help=g.DGI_ARISTOCRAT_TOTAL),
+                     })
+
+        st.divider()
+        st.markdown("### 🌱 DRIP 시뮬레이터 (비관/baseline/낙관)")
+        st.caption(
+            "현실성 가드: 투영 CAGR ±35%/yr clip, 배당수익률 12% 상한. 단순 외삽이라 *방향* 참고용."
+        )
+        up1, up2 = st.columns([0.55, 0.45])
+        with up1:
+            us_picks = st.multiselect(
+                "시뮬할 종목 (최대 5개)",
+                filt["ticker"].tolist(),
+                default=filt["ticker"].head(3).tolist(),
+                format_func=lambda t: f"{t} {filt[filt['ticker']==t]['name'].iloc[0][:24] if not filt[filt['ticker']==t].empty else ''}",
+                max_selections=5, key="us_dgi_picks",
+            )
+        with up2:
+            upc1, upc2 = st.columns(2)
+            with upc1:
+                us_init = st.number_input("초기 투자금 ($)", min_value=0, value=10_000,
+                                           step=1_000, key="us_drip_init")
+                us_years = st.slider("보유 기간 (년)", 1, 40, 20, 1, key="us_drip_years")
+            with upc2:
+                us_monthly = st.number_input("월 추가납입 ($)", min_value=0, value=500,
+                                              step=100, key="us_drip_monthly")
+                us_tax = st.slider("배당세 (%)", 0.0, 40.0, 15.0, 0.5, key="us_drip_tax",
+                                    help="US 배당 원천징수. 한국 거주자는 보통 15% (조세조약).")
+
+        if us_picks:
+            from moneygold.strategies.value_long_term import drip as drip_mod
+
+            sim_inputs = []
+            for tk in us_picks:
+                row = filt[filt["ticker"] == tk].iloc[0]
+                bars = store.read_parquet_safe(store.bars_path(Path(data_dir_str), tk))
+                cur_price = float(bars.iloc[-1]["close"]) if bars is not None and not bars.empty else 100.0
+                yld = row.get("dividend_yield_pct") or 0.0
+                cur_dps = cur_price * float(yld) / 100.0 if yld else 0.0
+                if cur_dps <= 0:
+                    continue
+                sim_inputs.append(drip_mod.DripInputs(
+                    ticker=tk, name=str(row.get("name") or tk)[:24], asof=asof_str,
+                    initial_investment_krw=float(us_init),
+                    monthly_contribution_krw=float(us_monthly),
+                    years=int(us_years), current_price_krw=cur_price,
+                    current_annual_dps_krw=cur_dps,
+                    price_cagr_pct=float(row.get("price_cagr_5y_pct") or 0.0),
+                    dps_cagr_pct=float(row.get("dps_cagr_5y_pct") or 0.0),
+                    tax_rate_pct=float(us_tax),
+                ))
+            if not sim_inputs:
+                st.info("선택 종목 중 배당 데이터가 충분한 종목이 없습니다.")
+            else:
+                results = {inp.ticker: drip_mod.simulate_scenarios(inp) for inp in sim_inputs}
+                srows = []
+                for tk, sc in results.items():
+                    nm = sc["baseline"].inputs.name
+                    d = {"ticker": tk, "name": nm}
+                    for s in ("비관", "baseline", "낙관"):
+                        d[f"{s} 최종($)"] = round(sc[s].final_value_krw)
+                        d[f"{s} CAGR(%)"] = round(sc[s].annualized_return_pct, 1)
+                    d["총투입($)"] = round(sc["baseline"].total_invested_krw)
+                    srows.append(d)
+                st.dataframe(pd.DataFrame(srows), use_container_width=True, hide_index=True)
+
+                vparts = []
+                for tk, sc in results.items():
+                    nm = sc["baseline"].inputs.name
+                    for s, r in sc.items():
+                        line = r.timeline[["month_idx", "value"]].copy()
+                        line["label"] = f"{tk} · {s}"
+                        vparts.append(line)
+                if vparts:
+                    cdf = pd.concat(vparts, ignore_index=True)
+                    pivot = cdf.pivot(index="month_idx", columns="label", values="value")
+                    st.line_chart(pivot, height=380, y_label="자산 가치 ($)", x_label="개월")

@@ -198,7 +198,9 @@ def price_cagr_5y_pct(bars_df: pd.DataFrame, asof: str) -> float | None:
     start_close = float(start_row["close"])
     start_dt = datetime.strptime(str(start_row["date"]), "%Y%m%d")
     years = (asof_dt - start_dt).days / 365.25
-    if years <= 0 or start_close <= 0:
+    # 윈도우가 2년 미만이면 '5년 CAGR' 외삽이 무의미 (신규상장·분사주가 132%/yr 같은
+    # 과대 CAGR로 자본이득 만점을 부당 수령). 데이터 부족으로 처리.
+    if years < 2.0 or start_close <= 0:
         return None
     cagr = (end_close / start_close) ** (1.0 / years) - 1.0
     return round(cagr * 100, 2)
