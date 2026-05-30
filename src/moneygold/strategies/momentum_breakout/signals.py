@@ -143,6 +143,8 @@ def find_entry_candidates(
     bars_by_ticker : ticker → bars DataFrame (date 컬럼 YYYYMMDD str, value 컬럼 필수).
     master : 종목 마스터. columns ⊇ {'ticker','name','market'}.
         'mcap' 있으면 top_n_marketcap 적용. 시장별 독립 ranking (KR 통합 / US 별도).
+        거래대금/시총 rank 컷은 그룹별로 다름 — US는 메가캡 쏠림 때문에 완화된 값
+        (top_n_value_us / top_n_marketcap_us). cfg.top_n_for_group() 참조.
     cfg : MomentumConfig. None이면 load_momentum_config() (env 기반).
     apply_filter_master : True면 우선주/스팩/리츠/ETP 제외 (KR universe 필터, US는 영향 없음).
     markets : 처리할 시장 코드들. None이면 전체. 예: ('KOSPI','KOSDAQ') 또는 ('US',).
@@ -150,7 +152,7 @@ def find_entry_candidates(
     Returns
     -------
     list[BreakoutEntry]  score desc 정렬. 각 시장 그룹 내에서 독립적으로 ranking 후 결합.
-        value_rank 는 그 시장 그룹 내 순위 (KR 그룹 내 1-100 / US 그룹 내 1-100).
+        value_rank 는 그 시장 그룹 내 거래대금 순위 (1-based, 그룹 전체 종목 기준).
     """
     if cfg is None:
         from .config import load_momentum_config
@@ -188,9 +190,12 @@ def _find_in_market_group(
     if m.empty:
         return []
 
+    # 그룹별 거래대금/시총 rank 컷 — US는 메가캡 쏠림 때문에 완화된 값 (config 참조)
+    top_n_value, top_n_marketcap = cfg.top_n_for_group(group)
+
     # 시가총액 게이트 — *그룹 내* 상위 N
-    if cfg.top_n_marketcap is not None and "mcap" in m.columns:
-        m = m.sort_values("mcap", ascending=False).head(cfg.top_n_marketcap)
+    if top_n_marketcap is not None and "mcap" in m.columns:
+        m = m.sort_values("mcap", ascending=False).head(top_n_marketcap)
 
     # KR universe 필터 (우선주/스팩/리츠/ETP). US 그룹엔 효과 적지만 안전하게 호출 가능.
     if apply_filter_master and "KOSPI" in group:
@@ -216,7 +221,7 @@ def _find_in_market_group(
     if not today_value:
         return []
 
-    top_value_set = flt.top_n_by_value(today_value, cfg.top_n_value)
+    top_value_set = flt.top_n_by_value(today_value, top_n_value)
     value_rank_map = {
         tk: rank for rank, tk in enumerate(
             sorted(today_value.keys(), key=lambda k: -today_value[k]), start=1

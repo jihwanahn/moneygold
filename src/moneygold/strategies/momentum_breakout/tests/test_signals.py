@@ -42,6 +42,8 @@ def _cfg(**overrides) -> MomentumConfig:
         trailing_ma_period=overrides.get("trailing_ma_period", base.trailing_ma_period),
         top_n_value=overrides.get("top_n_value", base.top_n_value),
         top_n_marketcap=overrides.get("top_n_marketcap", base.top_n_marketcap),
+        top_n_value_us=overrides.get("top_n_value_us", base.top_n_value_us),
+        top_n_marketcap_us=overrides.get("top_n_marketcap_us", base.top_n_marketcap_us),
         volume_spike_ratio=overrides.get("volume_spike_ratio", base.volume_spike_ratio),
         volume_avg_window=overrides.get("volume_avg_window", base.volume_avg_window),
         min_listed_days=overrides.get("min_listed_days", base.min_listed_days),
@@ -139,6 +141,49 @@ def test_top_n_value_cuts_low_value_ticker():
     )
     assert len(out) == 1
     assert out[0].ticker == "ACE"
+
+
+def test_us_group_uses_relaxed_top_n_independent_of_kr_scalar():
+    """US 그룹은 top_n_value_us 를 쓰고 KR scalar top_n_value 에 영향받지 않는다.
+
+    회귀 방지: 과거엔 KR과 동일한 top_n_value=100/mcap=100 컷이 US 거래대금 분포
+    (메가캡 쏠림)에선 초대형주만 남겨 BUY 후보 풀 ⚡ 오버레이가 US에서 0건이었다.
+    이제 US는 별도(완화된) 컷을 쓰므로, KR scalar 가 1 이어도 US 후보는 살아남아야 한다.
+    """
+    # 두 US 종목 모두 신고가 돌파. ACE 거래대금 > SLO.
+    bars_ace = trending_then_breakout(
+        n_pre=100, pre_level=100, pre_amplitude=3,
+        breakout_close=110.0, breakout_volume_mult=3.0, ticker="ACE",
+    )
+    bars_slow = trending_then_breakout(
+        n_pre=100, pre_level=50, pre_amplitude=2,
+        breakout_close=55.0, breakout_volume_mult=2.0, seed=99, ticker="SLO",
+    )
+    master = _master(["ACE", "SLO"], market="US")
+    asof = bars_ace["date"].iloc[-1]
+    bars_map = {"ACE": bars_ace, "SLO": bars_slow}
+
+    # KR scalar=1 (US엔 무관), US 컷=2 → 두 US 종목 모두 통과.
+    out = find_entry_candidates(
+        asof, bars_map, master,
+        _cfg(top_n_value=1, top_n_value_us=2), apply_filter_master=False,
+    )
+    assert {e.ticker for e in out} == {"ACE", "SLO"}
+
+    # US 컷=1 → 거래대금 상위 ACE 만.
+    out_tight = find_entry_candidates(
+        asof, bars_map, master,
+        _cfg(top_n_value=100, top_n_value_us=1), apply_filter_master=False,
+    )
+    assert [e.ticker for e in out_tight] == ["ACE"]
+
+
+def test_top_n_for_group_resolves_per_market():
+    """top_n_for_group: US 그룹은 _us 필드, 그 외는 scalar."""
+    cfg = MomentumConfig(top_n_value=100, top_n_marketcap=100,
+                         top_n_value_us=1000, top_n_marketcap_us=None)
+    assert cfg.top_n_for_group(("KOSPI", "KOSDAQ")) == (100, 100)
+    assert cfg.top_n_for_group(("US",)) == (1000, None)
 
 
 def test_no_breakout_returns_empty():
