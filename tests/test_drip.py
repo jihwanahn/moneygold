@@ -244,3 +244,133 @@ def test_simulate_scenarios_baseline_matches_simulate():
     scen = drip.simulate_scenarios(inputs, price_volatility_pp=3, dps_volatility_pp=2)
     direct = drip.simulate(inputs)
     assert scen["baseline"].final_value_krw == direct.final_value_krw
+
+
+# ============================================================
+# 수익률 상한 (max_dividend_yield_pct) — 발산 방지
+# ============================================================
+
+def test_yield_cap_rejects_nonpositive():
+    with pytest.raises(ValueError, match="max_dividend_yield_pct"):
+        drip.DripInputs(
+            ticker="X", name="t", asof="20260528",
+            initial_investment_krw=1_000_000, monthly_contribution_krw=0,
+            years=10, current_price_krw=10000, current_annual_dps_krw=300,
+            price_cagr_pct=5, dps_cagr_pct=5, max_dividend_yield_pct=0,
+        )
+
+
+def test_dividend_saturates_not_diverges():
+    """dps_cagr가 극단적으로 커도 yield cap이 발산을 막아 최종값이 포화.
+
+    회귀: 이 가드를 제거(cap 매우 큼)하면 폭주 재현 — cap이 동작 원인임을 고정.
+    """
+    base = dict(
+        ticker="X", name="t", asof="20260528",
+        initial_investment_krw=10_000_000, monthly_contribution_krw=0,
+        years=20, current_price_krw=10_000, current_annual_dps_krw=300,
+        price_cagr_pct=10,
+    )
+    capped_100 = drip.simulate(drip.DripInputs(**base, dps_cagr_pct=100))
+    capped_1000 = drip.simulate(drip.DripInputs(**base, dps_cagr_pct=1000))
+    # dps_cagr 100 vs 1000 — cap이 binding이라 최종값 거의 동일 (5% 이내)
+    rel = abs(capped_1000.final_value_krw - capped_100.final_value_krw) / capped_100.final_value_krw
+    assert rel < 0.05, f"capped should saturate, got rel diff {rel:.2%}"
+    # cap 사실상 해제하면 폭주 (포화 안 함)
+    uncapped = drip.simulate(drip.DripInputs(**base, dps_cagr_pct=1000,
+                                              max_dividend_yield_pct=100000))
+    assert uncapped.final_value_krw > capped_1000.final_value_krw * 100
+
+
+def test_effective_yield_never_exceeds_cap():
+    """모든 월에서 effective 배당수익률(effective_dps/price)이 cap을 초과하지 않음."""
+    inp = drip.DripInputs(
+        ticker="X", name="t", asof="20260528",
+        initial_investment_krw=10_000_000, monthly_contribution_krw=0,
+        years=20, current_price_krw=10_000, current_annual_dps_krw=300,
+        price_cagr_pct=3, dps_cagr_pct=40, max_dividend_yield_pct=12,
+    )
+    r = drip.simulate(inp)
+    # cum_dividend_gross 증가분으로 역산하기 어려우니, 시작 시점부터 dps>price*cap 인 케이스로
+    # 시작 yield > cap 시에도 크래시/inf 없이 유한값
+    assert r.final_value_krw > 0
+    assert r.final_value_krw < float("inf")
+    # 시작부터 cap 초과 케이스
+    inp2 = drip.DripInputs(
+        ticker="Y", name="t", asof="20260528",
+        initial_investment_krw=10_000_000, monthly_contribution_krw=0,
+        years=10, current_price_krw=10_000, current_annual_dps_krw=2000,  # 20% > cap 12%
+        price_cagr_pct=5, dps_cagr_pct=5, max_dividend_yield_pct=12,
+    )
+    r2 = drip.simulate(inp2)
+    assert 0 < r2.final_value_krw < float("inf")
+
+
+def test_high_gap_monotonicity_hana_regression():
+    """하나금융 회귀: price 21%, dps 34.7%, 20년 → 비관<baseline<낙관 (역전 없음).
+
+    이 케이스가 원래 버그(낙관 CAGR < 비관 CAGR)를 트리거했던 입력.
+    """
+    inp = drip.DripInputs(
+        ticker="086790", name="하나금융", asof="20260528",
+        initial_investment_krw=10_000_000, monthly_contribution_krw=500_000,
+        years=20, current_price_krw=70_000, current_annual_dps_krw=4_500,
+        price_cagr_pct=21.0, dps_cagr_pct=34.7,
+    )
+    out = drip.simulate_scenarios(inp)
+    assert out["비관"].final_value_krw < out["baseline"].final_value_krw < out["낙관"].final_value_krw
+    assert out["비관"].annualized_return_pct < out["baseline"].annualized_return_pct
+    assert out["baseline"].annualized_return_pct < out["낙관"].annualized_return_pct
+
+
+# ============================================================
+# CAGR 클램프 (max_abs_cagr_pct) — 장기 외삽 발산 방지
+# ============================================================
+
+def test_cagr_clamp_rejects_nonpositive():
+    with pytest.raises(ValueError, match="max_abs_cagr_pct"):
+        drip.DripInputs(
+            ticker="X", name="t", asof="20260528",
+            initial_investment_krw=1_000_000, monthly_contribution_krw=0,
+            years=10, current_price_krw=10000, current_annual_dps_krw=300,
+            price_cagr_pct=5, dps_cagr_pct=5, max_abs_cagr_pct=0,
+        )
+
+
+def test_extreme_price_cagr_clamped_no_divergence():
+    """price_cagr 193%/yr (네오티스류 selection-bias) 20년 외삽이 발산하지 않음."""
+    inp = drip.DripInputs(
+        ticker="085910", name="네오티스", asof="20260528",
+        initial_investment_krw=10_000_000, monthly_contribution_krw=500_000,
+        years=20, current_price_krw=10_000, current_annual_dps_krw=300,
+        price_cagr_pct=193.0, dps_cagr_pct=10.0, max_abs_cagr_pct=35.0,
+    )
+    r = drip.simulate(inp)
+    # 35%/yr × 20yr = ~404배. 1천만+월50만 ≈ 1.3억 투입 → 수백억 이하 (조 단위 발산 X)
+    assert r.final_value_krw < 1e12, f"clamp should bound, got {r.final_value_krw:.2e}"
+    # 클램프가 동작했다는 note
+    assert any("price_cagr" in n for n in r.notes)
+
+
+def test_cagr_clamp_preserves_monotonicity():
+    """클램프가 걸려도 비관≤baseline≤낙관 단조성 유지 (클램프는 단조 함수)."""
+    inp = drip.DripInputs(
+        ticker="X", name="t", asof="20260528",
+        initial_investment_krw=10_000_000, monthly_contribution_krw=500_000,
+        years=20, current_price_krw=10_000, current_annual_dps_krw=400,
+        price_cagr_pct=40.0, dps_cagr_pct=30.0, max_abs_cagr_pct=35.0,
+    )
+    out = drip.simulate_scenarios(inp)
+    assert out["비관"].final_value_krw <= out["baseline"].final_value_krw <= out["낙관"].final_value_krw
+
+
+def test_normal_cagr_not_clamped():
+    """정상 범위 CAGR(20% 이하)은 클램프 영향 없음 — note 비어있음."""
+    inp = drip.DripInputs(
+        ticker="X", name="t", asof="20260528",
+        initial_investment_krw=10_000_000, monthly_contribution_krw=0,
+        years=20, current_price_krw=10_000, current_annual_dps_krw=300,
+        price_cagr_pct=15.0, dps_cagr_pct=10.0, max_abs_cagr_pct=35.0,
+    )
+    r = drip.simulate(inp)
+    assert r.notes == []

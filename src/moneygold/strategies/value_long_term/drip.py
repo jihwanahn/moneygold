@@ -44,6 +44,19 @@ class DripInputs:
     dividend_frequency: int = 4   # 1=연1회, 2=반기, 4=분기, 12=월배당
     tax_rate_pct: float = 15.4    # 배당세
     contribution_frequency: int = 12  # 12=월, 4=분기, 1=연
+    # 배당수익률 상한(%). DPS가 주가보다 빠르게 자라면(dps_cagr > price_cagr) 수익률이
+    # 무한 발산해 배당 > 주가라는 불가능한 상태가 됨 → DRIP 재투자 폭주.
+    # 매 시점 effective_dps = min(annual_dps, price × max_yield/100)로 상한.
+    # 일단 cap이 걸리면 배당이 주가와 함께 성장(=수익률 mean-revert) — 현실적.
+    # 한국 우량 배당주는 2~8%, 고배당도 10% 미만이라 12%면 충분히 관대.
+    # 주의: 이 cap은 DRIP 복리 성장률의 *상한*이기도 함 (cap=30이면 30%/yr 복리 가능) →
+    #       기본 12 권장. UI 슬라이더로 노출 시 ~15 이하로 제한할 것.
+    max_dividend_yield_pct: float = 12.0
+    # 투영 CAGR 절대 상한(%/yr). 5년 CAGR을 20~40년 외삽하면 고성장주(price_cagr 100%+)가
+    # 천문학적으로 발산 (1천만 투자 → 수억 '억'). 5년 selection-bias CAGR은 장기 지속 불가 —
+    # 투영 시 ±max_abs_cagr로 clip. 35%면 매우 관대 (장기 우량주도 20%/yr 넘기기 어려움).
+    # baseline/낙관/비관 모두 같은 상한이 적용되므로 단조성(낙관≥baseline≥비관)은 보존.
+    max_abs_cagr_pct: float = 35.0
 
     def __post_init__(self):
         if self.current_price_krw <= 0:
@@ -54,6 +67,10 @@ class DripInputs:
             raise ValueError("dividend_frequency must be one of {1,2,4,12}")
         if self.contribution_frequency not in (1, 2, 4, 12):
             raise ValueError("contribution_frequency must be one of {1,2,4,12}")
+        if self.max_dividend_yield_pct <= 0:
+            raise ValueError("max_dividend_yield_pct must be > 0")
+        if self.max_abs_cagr_pct <= 0:
+            raise ValueError("max_abs_cagr_pct must be > 0")
 
 
 # ============================================================
@@ -88,13 +105,32 @@ def simulate(inputs: DripInputs) -> DripResult:
       1. 가격을 monthly_price_growth로 업데이트
       2. DPS를 monthly_dps_growth로 업데이트
       3. 추가납입 (contribution_frequency 충족 시) → shares += contrib / price
-      4. 배당지급 (dividend_frequency 충족 시) → cash = shares × annual_dps / freq × (1 - tax),
-         shares += cash / price (DRIP)
+      4. 배당지급 (dividend_frequency 충족 시):
+         effective_dps = min(annual_dps, price × max_yield)  ← 수익률 상한
+         cash = shares × effective_dps / freq × (1 - tax); shares += cash / price (DRIP)
       5. 시점 자산 = shares × price 기록
+
+    수익률 상한(max_dividend_yield_pct): dps_cagr > price_cagr가 장기 지속되면
+    배당수익률이 무한 발산(배당 > 주가)해 DRIP이 폭주 → 비현실적 자산/CAGR.
+    매 시점 배당을 price × max_yield로 cap해 발산 방지.
     """
     n_months = inputs.years * 12
-    mg_price = _monthly_growth_from_annual(inputs.price_cagr_pct)
-    mg_dps = _monthly_growth_from_annual(inputs.dps_cagr_pct)
+    # 투영 CAGR clip — 5년 CAGR의 장기 외삽 발산 방지. 단조성 보존(clip은 단조 함수).
+    cap = inputs.max_abs_cagr_pct
+    proj_price_cagr = max(-cap, min(cap, inputs.price_cagr_pct))
+    proj_dps_cagr = max(-cap, min(cap, inputs.dps_cagr_pct))
+    clip_notes: list[str] = []
+    if proj_price_cagr != inputs.price_cagr_pct:
+        clip_notes.append(
+            f"price_cagr {inputs.price_cagr_pct:.1f}% → ±{cap:.0f}% clip (장기 외삽 발산 방지)"
+        )
+    if proj_dps_cagr != inputs.dps_cagr_pct:
+        clip_notes.append(
+            f"dps_cagr {inputs.dps_cagr_pct:.1f}% → ±{cap:.0f}% clip"
+        )
+    mg_price = _monthly_growth_from_annual(proj_price_cagr)
+    mg_dps = _monthly_growth_from_annual(proj_dps_cagr)
+    max_yield_frac = inputs.max_dividend_yield_pct / 100.0
 
     # 추가납입은 contribution_frequency당 1번 — 월에 해당하는 step interval
     contrib_interval = 12 // inputs.contribution_frequency
@@ -140,9 +176,13 @@ def simulate(inputs: DripInputs) -> DripResult:
             cum_invested += contrib_per_event
             total_cash_into_shares += contrib_per_event
 
+        # 수익률 상한 — 배당이 주가의 max_yield를 넘지 못하게. 발산 방지.
+        # cap이 걸리면 effective_dps가 price와 함께 성장 (수익률 mean-revert).
+        effective_annual_dps = min(annual_dps, price * max_yield_frac)
+
         # 3. 배당 (DRIP)
         if m % div_interval == 0:
-            div_per_payment = annual_dps / inputs.dividend_frequency
+            div_per_payment = effective_annual_dps / inputs.dividend_frequency
             gross = shares * div_per_payment
             net = gross * tax_factor
             cum_div_gross += gross
@@ -151,10 +191,10 @@ def simulate(inputs: DripInputs) -> DripResult:
             shares_added = net / price if price > 0 else 0.0
             shares += shares_added
 
-        # YoC = (이번 연간 DPS) / 평균 매입 단가 × 100. 평균 매입단가는 invest 캐시 / shares-from-cash.
-        # 단순화: total_cash_into_shares는 cum_invested와 동일 (DRIP은 cash 추가가 아니므로).
+        # YoC = (이번 연간 DPS) / 평균 매입 단가 × 100. effective(상한 적용) DPS 사용.
+        # 평균 매입단가는 cum_invested / shares (DRIP은 cash 추가 아니므로 cum_invested 불변).
         avg_cost = (cum_invested / shares) if shares > 0 else 0.0
-        yoc = (annual_dps / avg_cost * 100.0) if avg_cost > 0 else 0.0
+        yoc = (effective_annual_dps / avg_cost * 100.0) if avg_cost > 0 else 0.0
 
         rows.append({
             "month_idx": m,
@@ -181,6 +221,7 @@ def simulate(inputs: DripInputs) -> DripResult:
         total_dividend_net_krw=cum_div_net,
         final_yoc_pct=final_yoc,
         annualized_return_pct=annualized,
+        notes=clip_notes,
     )
 
 
